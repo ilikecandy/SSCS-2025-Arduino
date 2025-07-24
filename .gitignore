@@ -39,3 +39,7 @@
 
 # debug information files
 *.dwo
+
+secrets.h
+.pio
+.vscode
