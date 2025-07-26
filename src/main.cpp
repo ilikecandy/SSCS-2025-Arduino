@@ -7,30 +7,18 @@ VisionAssistant visionAssistant;
 TTS tts;
 bool ttsAvailable = false;
 
-// Custom response callback function with TTS integration
-void customResponseHandler(const String& response) {
-    Serial.println("=== Custom Response Handler ===");
-    Serial.printf("Received response: %s\n", response.c_str());
-    
-    // Use TTS to speak the response - this will try lazy initialization if needed
-    if (!tts.speakText(response)) {
-        Serial.println("Failed to speak response via TTS - continuing without audio");
+// Tool call handler for speaking messages
+void toolHandler(const String& toolName, const String& message) {
+    if (toolName == "speakMessage") {
+        Serial.printf("Tool call received: %s - Message: %s\n", toolName.c_str(), message.c_str());
+        if (ttsAvailable) {
+            if (!tts.speakText(message)) {
+                Serial.println("Failed to speak message via TTS.");
+            }
+        } else {
+            Serial.println("TTS not available to speak message.");
+        }
     }
-    
-    // Example: Parse response for specific keywords and take actions
-    if (response.indexOf("person") != -1) {
-        Serial.println("Person detected!");
-        // Add your custom logic here
-    }
-    
-    if (response.indexOf("car") != -1) {
-        Serial.println("Car detected!");
-        // Add your custom logic here
-    }
-    
-    // You can add more sophisticated parsing here
-    // Parse JSON responses, extract object coordinates, etc.
-    Serial.println("=== End Custom Handler ===");
 }
 
 void setup() {
@@ -58,8 +46,8 @@ void setup() {
         // (The TTS class will store this for later use)
     }
     
-    // Set custom response callback (optional - comment out to use default)
-    visionAssistant.setResponseCallback(customResponseHandler);
+    // Set the tool callback
+    visionAssistant.setToolCallback(toolHandler);
     
     Serial.println("Vision Assistant setup complete - starting main loop");
 }

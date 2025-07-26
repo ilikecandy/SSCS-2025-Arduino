@@ -11,6 +11,7 @@ class VisionAssistant;
 
 // Callback function types
 typedef void (*ResponseCallback)(const String& response);
+typedef void (*ToolCallback)(const String& toolName, const String& message);
 
 class VisionAssistant {
 private:
@@ -21,9 +22,10 @@ private:
     bool systemPromptSent;
     unsigned long lastFrameTime;
     ResponseCallback responseCallback;
+    ToolCallback toolCallback;
     
     // Frame processing constants
-    static const unsigned long FRAME_INTERVAL = 500; // 500ms between frames
+    static const unsigned long FRAME_INTERVAL = 5000; // 500ms between frames
     static const size_t MAX_FRAME_SIZE = 50000; // Maximum frame size in bytes
     
 public:
@@ -36,6 +38,7 @@ public:
     
     // Callback management
     void setResponseCallback(ResponseCallback callback);
+    void setToolCallback(ToolCallback callback);
     
     // Frame processing
     void processFrame();
@@ -53,6 +56,7 @@ private:
     bool initializeCamera();
     bool initializeWebSocket();
     void sendSetupMessage();
+    void sendToolResponse(const char* functionId, const char* functionName, const char* result);
     void handleWebSocketMessage(const DynamicJsonDocument& doc);
 };
 

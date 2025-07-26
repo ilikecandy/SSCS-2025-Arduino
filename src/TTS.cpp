@@ -1,7 +1,6 @@
 #include "TTS.h"
 #include "secrets.h"
 
-// Deepgram API URL matching working example
 const char* TTS::DEEPGRAM_URL = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=48000&model=aura-asteria-en";
 
 TTS::TTS() : i2sInitialized(false) {
@@ -173,7 +172,7 @@ bool TTS::ensureInitialized() {
 }
 
 bool TTS::initializeI2S() {
-    Serial.println("Initializing I2S for MAX98357A (matching working example)...");
+    Serial.println("Initializing I2S for MAX98357A");
     
     // First, make sure the I2S port is not already in use
     i2s_driver_uninstall(I2S_PORT);
