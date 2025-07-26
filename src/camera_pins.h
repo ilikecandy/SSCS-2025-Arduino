@@ -1,7 +1,7 @@
 #ifndef CAMERA_PINS_H
 #define CAMERA_PINS_H
 
-// ---- Camera Configuration (Freenove WROVER CAM) ----
+// Camera Configuration (OVV3660 on ESP32)
 #define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM     21
@@ -19,4 +19,4 @@
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
 
-#endif // CAMERA_PINS_H
+#endif

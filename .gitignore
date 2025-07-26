@@ -40,6 +40,6 @@
 # debug information files
 *.dwo
 
-secrets.cpp
+src/secrets.cpp
 .pio
 .vscode

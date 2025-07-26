@@ -6,4 +6,4 @@
 
 void setupCamera();
 
-#endif // CAMERA_SETUP_H
+#endif

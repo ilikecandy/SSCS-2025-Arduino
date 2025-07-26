@@ -5,4 +5,4 @@
 
 String base64_encode(const uint8_t *data, size_t len);
 
-#endif // BASE64_H
+#endif

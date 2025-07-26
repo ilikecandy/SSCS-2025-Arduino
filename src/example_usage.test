@@ -1,0 +1,128 @@
+#include "vision_assistant.h"
+
+// Global Vision Assistant instance
+VisionAssistant visionAssistant;
+
+// Example of different response handlers for different use cases
+
+// Simple logging handler
+void loggingHandler(const String& response) {
+    Serial.println("LOG: " + response);
+}
+
+// Object detection handler
+void objectDetectionHandler(const String& response) {
+    Serial.println("=== Object Detection Handler ===");
+    
+    String lowerResponse = response;
+    lowerResponse.toLowerCase();
+    
+    // Simple keyword detection
+    if (lowerResponse.indexOf("person") != -1 || lowerResponse.indexOf("people") != -1) {
+        Serial.println("🚶 Person detected!");
+        // Trigger person detection actions
+    }
+    
+    if (lowerResponse.indexOf("car") != -1 || lowerResponse.indexOf("vehicle") != -1) {
+        Serial.println("🚗 Vehicle detected!");
+        // Trigger vehicle detection actions
+    }
+    
+    if (lowerResponse.indexOf("face") != -1) {
+        Serial.println("😊 Face detected!");
+        // Trigger face detection actions
+    }
+    
+    if (lowerResponse.indexOf("hand") != -1) {
+        Serial.println("✋ Hand detected!");
+        // Trigger hand gesture recognition
+    }
+    
+    Serial.printf("Full response: %s\n", response.c_str());
+    Serial.println("=== End Detection Handler ===");
+}
+
+// Security monitoring handler
+void securityHandler(const String& response) {
+    Serial.println("=== Security Monitor ===");
+    
+    String lowerResponse = response;
+    lowerResponse.toLowerCase();
+    
+    // Look for security-relevant objects
+    bool alertTriggered = false;
+    
+    if (lowerResponse.indexOf("person") != -1) {
+        Serial.println("🚨 ALERT: Person detected in monitored area!");
+        alertTriggered = true;
+    }
+    
+    if (lowerResponse.indexOf("motion") != -1 || lowerResponse.indexOf("moving") != -1) {
+        Serial.println("🚨 ALERT: Motion detected!");
+        alertTriggered = true;
+    }
+    
+    if (alertTriggered) {
+        // In a real application, you might:
+        // - Send notification to phone/email
+        // - Trigger recording
+        // - Sound alarm
+        // - Send to cloud monitoring service
+        Serial.println("Security alert actions would be triggered here");
+    }
+    
+    Serial.println("=== End Security Monitor ===");
+}
+
+// Analytics handler - could store data for analysis
+void analyticsHandler(const String& response) {
+    static int responseCount = 0;
+    responseCount++;
+    
+    Serial.printf("=== Analytics [Response #%d] ===\n", responseCount);
+    Serial.printf("Response length: %d characters\n", response.length());
+    Serial.printf("Timestamp: %lu ms\n", millis());
+    
+    // In a real application, you might:
+    // - Store responses in flash memory
+    // - Count object occurrences
+    // - Calculate detection frequencies
+    // - Build activity patterns
+    
+    Serial.printf("Response: %s\n", response.c_str());
+    Serial.println("=== End Analytics ===");
+}
+
+void setup() {
+    // Initialize the vision assistant
+    if (!visionAssistant.initialize()) {
+        Serial.println("Failed to initialize Vision Assistant!");
+        while (true) {
+            delay(1000);
+        }
+    }
+    
+    // Choose which handler to use by uncommenting one of these:
+    
+    // Basic logging (default if none set)
+    // visionAssistant.setResponseCallback(loggingHandler);
+    
+    // Object detection focused
+    visionAssistant.setResponseCallback(objectDetectionHandler);
+    
+    // Security monitoring
+    // visionAssistant.setResponseCallback(securityHandler);
+    
+    // Analytics and data collection
+    // visionAssistant.setResponseCallback(analyticsHandler);
+    
+    Serial.println("Vision Assistant setup complete with custom handler");
+}
+
+void loop() {
+    // Run the vision assistant
+    visionAssistant.run();
+    
+    // You can add other non-blocking code here
+    // For example, handling other sensors, buttons, etc.
+}

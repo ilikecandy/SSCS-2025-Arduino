@@ -1,9 +1,7 @@
 #include "base64.h"
 
-// ---- Base64 Encoding Alphabet ----
 const char b64_alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-// ---- Base64 Encode Function ----
 String base64_encode(const uint8_t *data, size_t len) {
     String encoded;
     encoded.reserve(((len + 2) / 3) * 4);
@@ -23,7 +21,6 @@ String base64_encode(const uint8_t *data, size_t len) {
         encoded += (i + 2 < len) ? b64_alphabet[val & 0x3F] : '=';
     }
 
-    // Correct padding
     if (pad == 1) {
         encoded.setCharAt(encoded.length() - 1, '=');
     }
