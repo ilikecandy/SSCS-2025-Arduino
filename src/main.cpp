@@ -1,22 +1,62 @@
 #include "vision_assistant.h"
 #include "TTS.h"
 #include "secrets.h"
+#include <ArduinoJson.h>
 
 VisionAssistant visionAssistant;
 TTS tts;
 bool ttsAvailable = false;
 
-// Tool call handler for speaking messages
-void toolHandler(const String& toolName, const String& message) {
+// Tool call handler for system actions
+void toolHandler(const String& toolName, const String& jsonParams) {
     Serial.printf("Tool call handler invoked for: %s\n", toolName.c_str());
-    if (toolName == "speakMessage") {
-        Serial.printf("Tool call received: %s - Message: %s\n", toolName.c_str(), message.c_str());
-        if (ttsAvailable) {
-            if (!tts.speakText(message)) {
-                Serial.println("Failed to speak message via TTS.");
+    if (toolName == "systemAction") {
+        Serial.printf("systemAction call received with params: %s\n", jsonParams.c_str());
+        
+        // Parse JSON parameters
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, jsonParams);
+        
+        if (error) {
+            Serial.printf("Failed to parse JSON parameters: %s\n", error.c_str());
+            return;
+        }
+        
+        // Extract parameters
+        String intent = doc["intent"].as<String>();
+        bool shouldSpeak = doc["shouldSpeak"].as<bool>();
+        String message = doc["message"].as<String>();
+        String logEntry = doc["logEntry"].as<String>();
+        String routeTo = doc["routeTo"].as<String>();
+        String routeParams = doc["routeParams"].as<String>();
+        
+        Serial.printf("Intent: %s\n", intent.c_str());
+        Serial.printf("Should Speak: %s\n", shouldSpeak ? "true" : "false");
+        Serial.printf("Message: %s\n", message.c_str());
+        Serial.printf("Log Entry: %s\n", logEntry.c_str());
+        Serial.printf("Route To: %s\n", routeTo.c_str());
+        Serial.printf("Route Params: %s\n", routeParams.c_str());
+        
+        // Handle speaking if required
+        if (shouldSpeak && !message.isEmpty()) {
+            if (ttsAvailable) {
+                if (!tts.speakText(message)) {
+                    Serial.println("Failed to speak message via TTS.");
+                }
+            } else {
+                Serial.println("TTS not available to speak message.");
             }
-        } else {
-            Serial.println("TTS not available to speak message.");
+        }
+        
+        // Log the entry if provided
+        if (!logEntry.isEmpty()) {
+            Serial.printf("LOG: %s\n", logEntry.c_str());
+        }
+        
+        // Handle routing if specified
+        if (!routeTo.isEmpty()) {
+            Serial.printf("Routing to: %s with params: %s\n", routeTo.c_str(), routeParams.c_str());
+            // Add routing logic here as needed
         }
     }
 }
@@ -30,9 +70,9 @@ void setup() {
         }
     }
     
-    // Give the camera system time to stabilize
-    Serial.println("Waiting for camera system to stabilize...");
-    delay(2000);
+    // // Give the camera system time to stabilize
+    // Serial.println("Waiting for camera system to stabilize...");
+    // delay(2000);
     
     // Print GPS status
     Serial.println("GPS Status at startup:");

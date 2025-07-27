@@ -218,12 +218,12 @@ void VisionAssistant::sendToolResponse(const char *functionId, const char *funct
 }
 
 void VisionAssistant::handleWebSocketMessage(const JsonDocument &doc) {
-    Serial.println("Received WebSocket message:");
-    serializeJsonPretty(doc, Serial);
-    Serial.println();
+    // Serial.println("Received WebSocket message:");
+    // serializeJsonPretty(doc, Serial);
+    // Serial.println();
     // Check for setupComplete signal
     if (doc.containsKey("setupComplete")) {
-        Serial.println("Setup complete – ready to send frames");
+        Serial.println("Setup complete - ready to send frames");
         setupComplete = true;
         systemPromptSent = true;
         return;
@@ -241,14 +241,18 @@ void VisionAssistant::handleWebSocketMessage(const JsonDocument &doc) {
                 const char *toolName = funcCall["name"];
                 const char *toolId = funcCall["id"];
                 Serial.printf("Tool call detected: %s (ID: %s)\n", toolName, toolId ? toolId : "N/A");
-                if (toolName && strcmp(toolName, "speakMessage") == 0) {
-                    const char *message = funcCall["args"]["message"];
-                    if (message && toolCallback) {
-                        Serial.printf("Tool call: %s(\"%s\")\n", toolName, message);
-                        toolCallback(toolName, message);
+                if (toolName && strcmp(toolName, "systemAction") == 0) {
+                    // For systemAction, we need to pass the entire args object as a JSON string
+                    JsonObjectConst args = funcCall["args"];
+                    String argsJson;
+                    serializeJson(args, argsJson);
+                    
+                    if (toolCallback) {
+                        Serial.printf("Tool call: %s(%s)\n", toolName, argsJson.c_str());
+                        toolCallback(toolName, argsJson);
 
                         // Send tool response back to Gemini
-                        sendToolResponse(toolId, toolName, "Function executed successfully");
+                        sendToolResponse(toolId, toolName, "System action processed successfully");
                     }
                 }
             }
@@ -314,6 +318,8 @@ void VisionAssistant::webSocketEvent(WStype_t type, uint8_t *payload, size_t len
             instance->handleWebSocketMessage(doc);
             break;
         }
+
+        
 
         default:
             break;
