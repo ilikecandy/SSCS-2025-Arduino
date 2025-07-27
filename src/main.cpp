@@ -2,13 +2,13 @@
 #include "TTS.h"
 #include "secrets.h"
 
-// Global instances
 VisionAssistant visionAssistant;
 TTS tts;
 bool ttsAvailable = false;
 
 // Tool call handler for speaking messages
 void toolHandler(const String& toolName, const String& message) {
+    Serial.printf("Tool call handler invoked for: %s\n", toolName.c_str());
     if (toolName == "speakMessage") {
         Serial.printf("Tool call received: %s - Message: %s\n", toolName.c_str(), message.c_str());
         if (ttsAvailable) {
@@ -22,7 +22,7 @@ void toolHandler(const String& toolName, const String& message) {
 }
 
 void setup() {
-    // Initialize the vision assistant
+    // Initialize the vision assistant (includes GPS initialization)
     if (!visionAssistant.initialize()) {
         Serial.println("Failed to initialize Vision Assistant!");
         while (true) {
@@ -33,6 +33,15 @@ void setup() {
     // Give the camera system time to stabilize
     Serial.println("Waiting for camera system to stabilize...");
     delay(2000);
+    
+    // Print GPS status
+    Serial.println("GPS Status at startup:");
+    GPSData gpsData = visionAssistant.getCurrentGPSData();
+    if (gpsData.isValid) {
+        Serial.println("GPS: " + visionAssistant.getGPSString());
+    } else {
+        Serial.println("GPS: Searching for satellites...");
+    }
     
     // Try to initialize TTS with Deepgram API key
     // If this fails, we'll attempt lazy initialization later
@@ -53,6 +62,18 @@ void setup() {
 }
 
 void loop() {
-    // Run the vision assistant (handles WebSocket communication and frame processing)
+    // Run the vision assistant (handles WebSocket communication, GPS updates, and frame processing)
     visionAssistant.run();
+    
+    // Print GPS status every 30 seconds
+    static unsigned long lastGPSStatus = 0;
+    if (millis() - lastGPSStatus > 30000) {
+        GPSData gpsData = visionAssistant.getCurrentGPSData();
+        if (gpsData.isValid) {
+            Serial.println("GPS Status: " + visionAssistant.getGPSString());
+        } else {
+            Serial.println("GPS Status: No fix obtained");
+        }
+        lastGPSStatus = millis();
+    }
 }

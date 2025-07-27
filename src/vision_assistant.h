@@ -5,6 +5,7 @@
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 #include "esp_camera.h"
+#include "gps_module.h"
 
 // Forward declarations
 class VisionAssistant;
@@ -18,14 +19,17 @@ private:
     static VisionAssistant* instance;
     
     WebSocketsClient ws;
+    GPSModule gps;
     bool setupComplete;
     bool systemPromptSent;
     unsigned long lastFrameTime;
+    unsigned long lastGPSUpdate;
     ResponseCallback responseCallback;
     ToolCallback toolCallback;
     
     // Frame processing constants
     static const unsigned long FRAME_INTERVAL = 5000; // 500ms between frames
+    static const unsigned long GPS_UPDATE_INTERVAL = 1000; // 1 second between GPS updates
     static const size_t MAX_FRAME_SIZE = 50000; // Maximum frame size in bytes
     
 public:
@@ -44,6 +48,10 @@ public:
     void processFrame();
     bool isSetupComplete() const;
     
+    // GPS access
+    GPSData getCurrentGPSData() const;
+    String getGPSString() const;
+    
     // Static callback for WebSocket events
     static void webSocketEvent(WStype_t type, uint8_t *payload, size_t length);
     
@@ -54,10 +62,11 @@ private:
     // Internal helper methods
     bool connectToWiFi();
     bool initializeCamera();
+    bool initializeGPS();
     bool initializeWebSocket();
     void sendSetupMessage();
     void sendToolResponse(const char* functionId, const char* functionName, const char* result);
-    void handleWebSocketMessage(const DynamicJsonDocument& doc);
+    void handleWebSocketMessage(const JsonDocument& doc);
 };
 
 #endif // VISION_ASSISTANT_H
