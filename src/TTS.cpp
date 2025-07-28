@@ -3,14 +3,13 @@
 
 const char* TTS::DEEPGRAM_URL = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&model=aura-asteria-en";
 
-TTS::TTS() : i2sInitialized(false), softwareGain(1.0), hardwareGainHigh(false) {
-    // Initialize gain control pin
-    initializeGainPin();
+TTS::TTS() : i2sInitialized(false), softwareGain(1.0), audioBuffer(nullptr) {
 }
 
 TTS::~TTS() {
-    if (i2sInitialized) {
-        i2s_driver_uninstall(I2S_PORT);
+    releaseSpeakerAccess();
+    if (audioBuffer) {
+        free(audioBuffer);
     }
 }
 
@@ -20,14 +19,18 @@ bool TTS::initialize(const String& apiKey) {
     // Store API key
     deepgramApiKey = apiKey;
     
+    // Allocate audio buffer in PSRAM
+    if (!audioBuffer) {
+        audioBuffer = (uint8_t*)ps_malloc(BUFFER_SIZE);
+        if (!audioBuffer) {
+            Serial.println("Failed to allocate TTS audio buffer in PSRAM!");
+            return false;
+        }
+        Serial.printf("Allocated %d bytes for TTS audio buffer in PSRAM\n", BUFFER_SIZE);
+    }
+    
     // Optimize WiFi for maximum speed
     optimizeWiFiForSpeed();
-    
-    // Initialize I2S for audio output
-    if (!initializeI2S()) {
-        Serial.println("Failed to initialize I2S");
-        return false;
-    }
     
     Serial.println("TTS initialized successfully!");
     return true;
@@ -46,9 +49,9 @@ bool TTS::speakText(const String& text) {
         return false;
     }
     
-    // Try lazy initialization if not already initialized
-    if (!i2sInitialized && !ensureInitialized()) {
-        Serial.println("TTS: I2S not initialized and lazy initialization failed");
+    // Request I2S access for speaker
+    if (!requestSpeakerAccess()) {
+        Serial.println("❌ Cannot speak: I2S is busy with another device");
         return false;
     }
     
@@ -63,6 +66,7 @@ bool TTS::speakText(const String& text) {
     
     if (!callDeepgramAPI(text, &audioData, &dataSize)) {
         Serial.println("TTS: Failed to download audio from Deepgram");
+        releaseSpeakerAccess();
         return false;
     }
     
@@ -84,6 +88,9 @@ bool TTS::speakText(const String& text) {
     // Clean up allocated memory
     cleanupAudioData(audioData);
     
+    // Always release I2S access after speaking
+    releaseSpeakerAccess();
+    
     return playResult;
 }
 
@@ -92,6 +99,12 @@ bool TTS::streamDeepgramAPI(const String& text) {
 
     if (deepgramApiKey.length() < 10) {
         Serial.println("❌ Deepgram API key is not set or too short");
+        return false;
+    }
+
+    // Check if audioBuffer is allocated
+    if (!audioBuffer) {
+        Serial.println("❌ TTS audioBuffer not allocated");
         return false;
     }
 
@@ -242,55 +255,45 @@ bool TTS::ensureInitialized() {
 }
 
 bool TTS::initializeI2S() {
-    Serial.println("Initializing I2S for MAX98357A");
+    Serial.println("Initializing I2S for MAX98357A via I2SManager");
     
-    // First, make sure the I2S port is not already in use
-    i2s_driver_uninstall(I2S_PORT);
-    
-    // I2S configuration matching the working example
-    i2s_config_t i2s_config = {
-        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
-        .sample_rate = SAMPLE_RATE,  // 16000 Hz
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,  // Mono right channel for MAX98357A
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 32,
-        .dma_buf_len = 256,
-        .use_apll = false,
-        .tx_desc_auto_clear = true,
-        .fixed_mclk = 0
-    };
-    
-    // I2S pin configuration matching working example
-    i2s_pin_config_t pin_config = {
-        .bck_io_num = BCLK_PIN,     // 26
-        .ws_io_num = LRCLK_PIN,     // 25  
-        .data_out_num = DATA_PIN,   // 22
-        .data_in_num = I2S_PIN_NO_CHANGE
-    };
-    
-    Serial.println("Installing I2S driver...");
-    esp_err_t err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+    // Use I2SManager to initialize speaker I2S
+    esp_err_t err = I2SManager::initializeSpeaker();
     if (err != ESP_OK) {
-        Serial.printf("Failed to install I2S driver: %s\n", esp_err_to_name(err));
-        return false;
-    }
-    
-    err = i2s_set_pin(I2S_PORT, &pin_config);
-    if (err != ESP_OK) {
-        Serial.printf("Failed to set I2S pins: %s\n", esp_err_to_name(err));
-        i2s_driver_uninstall(I2S_PORT);
+        Serial.printf("Failed to initialize I2S via I2SManager: %s\n", esp_err_to_name(err));
         return false;
     }
     
     i2sInitialized = true;
-    Serial.println("I2S initialized successfully!");
-    
-    // Clear DMA buffer to ensure clean start
-    i2s_zero_dma_buffer(I2S_PORT);
+    Serial.println("I2S initialized successfully via I2SManager!");
     
     return true;
+}
+
+bool TTS::requestSpeakerAccess() {
+    if (I2SManager::hasI2SAccess(I2SDevice::SPEAKER)) {
+        // Already have access
+        return true;
+    }
+    
+    if (!I2SManager::requestI2SAccess(I2SDevice::SPEAKER)) {
+        return false;
+    }
+    
+    // Initialize I2S for speaker use
+    if (!initializeI2S()) {
+        I2SManager::releaseI2SAccess(I2SDevice::SPEAKER);
+        return false;
+    }
+    
+    return true;
+}
+
+void TTS::releaseSpeakerAccess() {
+    if (I2SManager::hasI2SAccess(I2SDevice::SPEAKER)) {
+        i2sInitialized = false;
+        I2SManager::releaseI2SAccess(I2SDevice::SPEAKER);
+    }
 }
 
 bool TTS::callDeepgramAPI(const String& text, uint8_t** audioData, size_t* dataSize) {
@@ -468,6 +471,11 @@ bool TTS::callDeepgramAPI(const String& text, uint8_t** audioData, size_t* dataS
 }
 
 bool TTS::playAudioData(const uint8_t* audioData, size_t dataSize) {
+    if (!I2SManager::hasI2SAccess(I2SDevice::SPEAKER)) {
+        Serial.println("TTS: No I2S access for speaker");
+        return false;
+    }
+    
     if (!i2sInitialized) {
         Serial.println("TTS: I2S not initialized");
         return false;
@@ -500,8 +508,7 @@ bool TTS::playAudioData(const uint8_t* audioData, size_t dataSize) {
     unsigned long estimatedDurationMs = (dataSize * 1000) / (SAMPLE_RATE * 2);  // 16-bit samples
     Serial.printf("⏱️ Estimated playback duration: %lu ms (%.1f seconds)\n", 
                  estimatedDurationMs, estimatedDurationMs / 1000.0);
-    Serial.printf("🔊 Hardware gain: %s, Software gain: %.2f\n", 
-                 hardwareGainHigh ? "+9dB" : "+6dB", softwareGain);
+    Serial.printf("🔊 Software gain: %.2f\n", softwareGain);
     
     // Clear DMA buffer before starting playback
     i2s_zero_dma_buffer(I2S_PORT);
@@ -600,31 +607,8 @@ void TTS::setSoftwareGain(float gain) {
     Serial.printf("TTS: Software gain set to %.2f\n", softwareGain);
 }
 
-void TTS::setHardwareGain(bool highGain) {
-    hardwareGainHigh = highGain;
-    
-    // Set the GAIN pin on MAX98357A
-    digitalWrite(GAIN_PIN, hardwareGainHigh ? HIGH : LOW);
-    
-    Serial.printf("TTS: Hardware gain set to %s (%s)\n", 
-                 hardwareGainHigh ? "HIGH" : "LOW",
-                 hardwareGainHigh ? "+9dB" : "+6dB");
-}
-
 float TTS::getSoftwareGain() const {
     return softwareGain;
-}
-
-bool TTS::getHardwareGain() const {
-    return hardwareGainHigh;
-}
-
-void TTS::initializeGainPin() {
-    // Initialize the GAIN pin for MAX98357A hardware gain control
-    pinMode(GAIN_PIN, OUTPUT);
-    digitalWrite(GAIN_PIN, hardwareGainHigh ? HIGH : LOW);
-    Serial.printf("TTS: Gain pin %d initialized (%s)\n", GAIN_PIN, 
-                 hardwareGainHigh ? "+9dB" : "+6dB");
 }
 
 void TTS::applySoftwareGain(uint8_t* audioData, size_t dataSize) {

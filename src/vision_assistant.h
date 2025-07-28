@@ -51,6 +51,9 @@ public:
     // GPS access
     GPSData getCurrentGPSData() const;
     String getGPSString() const;
+
+    // Send a text message to Gemini
+    void sendTextMessage(const String& message);
     
     // Static callback for WebSocket events
     static void webSocketEvent(WStype_t type, uint8_t *payload, size_t length);

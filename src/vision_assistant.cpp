@@ -170,6 +170,7 @@ bool VisionAssistant::initializeCamera() {
 }
 
 bool VisionAssistant::initializeWebSocket() {
+    Serial.println("Initializing WebSocket...");
     ws.beginSSL(WS_HOST, WS_PORT, WS_PATH.c_str());
     ws.onEvent(webSocketEvent);
     ws.setReconnectInterval(5000);
@@ -302,7 +303,8 @@ void VisionAssistant::webSocketEvent(WStype_t type, uint8_t *payload, size_t len
             break;
         }
 
-        case WStype_BIN: {
+        case WStype_TEXT: {
+            Serial.printf("[WSc] Received text: %s\n", (char*)payload);
             JsonDocument doc;
             auto error = deserializeJson(doc, payload, length);
             if (error) {
@@ -319,7 +321,28 @@ void VisionAssistant::webSocketEvent(WStype_t type, uint8_t *payload, size_t len
             break;
         }
 
-        
+        case WStype_BIN: {
+            Serial.printf("[WSc] Received binary data: %zu bytes\n", length);
+            JsonDocument doc;
+            auto error = deserializeJson(doc, payload, length);
+            if (error) {
+                Serial.print("deserializeJson() failed: ");
+                Serial.println(error.c_str());
+                // Print the raw payload to see what we received
+                Serial.print("Raw payload: ");
+                Serial.write(payload, length);
+                Serial.println();
+                return;
+            }
+
+            instance->handleWebSocketMessage(doc);
+            break;
+        }
+
+        case WStype_ERROR: {
+            Serial.printf("[WSc] Error: %s\n", (char*)payload);
+            break;
+        }
 
         default:
             break;
@@ -344,4 +367,18 @@ void VisionAssistant::onGeminiResponse(const String &response) {
     // - Store responses for analysis
     // - Send responses to other systems
     Serial.println("Default response handler - response already processed");
+}
+
+void VisionAssistant::sendTextMessage(const String& message) {
+    if (!setupComplete) {
+        Serial.println("WebSocket not ready to send text message.");
+        return;
+    }
+
+    String msg = "{\"client_content\":{\"turn_complete\":true,\"turns\":[{\"role\":\"user\",\"parts\":[{\"text\":\"" + message + "\"}]}]}}";
+
+    bool sent = ws.sendTXT(msg);
+    if (!sent) {
+        Serial.println("Failed to send text message to Gemini");
+    }
 }
