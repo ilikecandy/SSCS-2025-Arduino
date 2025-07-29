@@ -27,7 +27,8 @@ esp_err_t read_microphone_data(int32_t* buffer, size_t buffer_size, size_t* byte
         return ESP_ERR_INVALID_STATE;
     }
     
-    return i2s_read(I2SManager::I2S_PORT, buffer, buffer_size, bytes_read, portMAX_DELAY);
+    // Use timeout similar to working demo (100ms)
+    return i2s_read(I2SManager::I2S_PORT, buffer, buffer_size, bytes_read, 100);
 }
 
 void stop_microphone() {
