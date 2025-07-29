@@ -105,7 +105,8 @@ esp_err_t I2SManager::initializeMicrophone() {
     }
     
     // Give microphone time to stabilize
-    delay(500);
+    // TODO delay(500);
+    delay(50);
     
     initialized = true;
     Serial.println("✅ I2S initialized for microphone");
@@ -171,7 +172,8 @@ esp_err_t I2SManager::initializeSpeaker() {
     }
     
     // Give speaker time to stabilize
-    delay(500);
+    // TODO delay(500);
+    delay(50);
     
     initialized = true;
     Serial.println("✅ I2S initialized for speaker");

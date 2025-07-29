@@ -1,3 +1,5 @@
+#include <Arduino.h>
+#include <math.h>
 #include "vision_assistant.h"
 #include "TTS.h"
 #include "secrets.h"
@@ -10,8 +12,18 @@ TTS tts;
 DeepgramClient deepgramClient(DEEPGRAM_API_KEY);
 bool ttsAvailable = false;
 
-// Wake word
-const char* WAKE_WORD = "hey centra";
+// Wake words (multiple variations allowed)
+const char* WAKE_WORDS[] = {
+    "hey centra",
+    "hi centra", 
+    "hello centra",
+    "hey central",
+    "hi central",
+    "hey center",
+    "hay centra",
+    "hey cintra"
+};
+const int WAKE_WORDS_COUNT = sizeof(WAKE_WORDS) / sizeof(WAKE_WORDS[0]);
 
 // Audio buffer
 const int AUDIO_BUFFER_SECONDS = 3;
@@ -33,6 +45,8 @@ QueueHandle_t commandQueue;
 // Function declarations
 void audioTask(void *pvParameters);
 void process_audio();
+void playDingSound();
+String cleanTextForWakeWord(const String& text);
 
 // Tool call handler for system actions
 void toolHandler(const String& toolName, const String& jsonParams) {
@@ -86,6 +100,109 @@ void toolHandler(const String& toolName, const String& jsonParams) {
             // Add routing logic here as needed
         }
     }
+}
+
+void playDingSound() {
+    Serial.println("🔔 Playing wake word confirmation ding...");
+    
+    // Check if microphone is active and temporarily stop it for I2S access
+    bool micWasActive = is_microphone_active();
+    if (micWasActive) {
+        Serial.println("🎤 Temporarily stopping microphone for ding sound...");
+        stop_microphone();
+    }
+    
+    // Generate a pleasant ding sound (two-tone chime)
+    const int dingDuration = 300;  // Total duration in ms
+    const int sampleRate = 16000;
+    const int samplesPerTone = (sampleRate * dingDuration / 2) / 1000;  // Split into two tones
+    const int totalSamples = samplesPerTone * 2;
+    
+    // Allocate buffer for ding sound
+    uint8_t* dingBuffer = (uint8_t*)malloc(totalSamples * 2);  // 16-bit samples
+    if (!dingBuffer) {
+        Serial.println("❌ Failed to allocate ding buffer");
+        
+        // Restart microphone if it was active
+        if (micWasActive) {
+            Serial.println("🎤 Restarting microphone after failed ding...");
+            setup_microphone();
+        }
+        return;
+    }
+    
+    int16_t* samples = (int16_t*)dingBuffer;
+    
+    // Generate first tone (800 Hz)
+    for (int i = 0; i < samplesPerTone; i++) {
+        float t = (float)i / sampleRate;
+        float amplitude = 0.3f * (1.0f - t * 2);  // Fade out
+        samples[i] = (int16_t)(amplitude * 8000 * sin(2 * PI * 800 * t));
+    }
+    
+    // Generate second tone (1000 Hz)
+    for (int i = 0; i < samplesPerTone; i++) {
+        float t = (float)i / sampleRate;
+        float amplitude = 0.3f * (1.0f - t * 2);  // Fade out
+        samples[samplesPerTone + i] = (int16_t)(amplitude * 8000 * sin(2 * PI * 1000 * t));
+    }
+    
+    // Play the ding sound
+    bool dingSuccess = false;
+    if (ttsAvailable) {
+        dingSuccess = tts.playAudioData(dingBuffer, totalSamples * 2);
+        if (!dingSuccess) {
+            Serial.println("❌ Failed to play ding sound");
+        }
+    } else {
+        Serial.println("❌ TTS not available for ding sound");
+    }
+    
+    // Clean up
+    free(dingBuffer);
+    
+    // Restart microphone if it was active
+    if (micWasActive) {
+        Serial.println("🎤 Restarting microphone after ding sound...");
+        if (!setup_microphone()) {
+            Serial.println("❌ Failed to restart microphone after ding!");
+        } else {
+            Serial.println("🎤 Microphone restarted successfully");
+        }
+    }
+    
+    if (dingSuccess) {
+        Serial.println("🔔 Ding sound complete - ready for command!");
+    } else {
+        Serial.println("🔔 Ding sound failed but continuing - ready for command!");
+    }
+}
+
+String cleanTextForWakeWord(const String& text) {
+    String cleaned = text;
+    cleaned.toLowerCase();
+    
+    // Remove common punctuation and extra spaces
+    cleaned.replace(".", "");
+    cleaned.replace(",", "");
+    cleaned.replace("!", "");
+    cleaned.replace("?", "");
+    cleaned.replace(";", "");
+    cleaned.replace(":", "");
+    cleaned.replace("-", "");
+    cleaned.replace("_", "");
+    cleaned.replace("'", "");
+    cleaned.replace("\"", "");
+    
+    // Replace multiple spaces with single space
+    while (cleaned.indexOf("  ") != -1) {
+        cleaned.replace("  ", " ");
+    }
+    
+    // Trim leading/trailing spaces
+    cleaned.trim();
+    
+    return cleaned;
 }
 
 void setup() {
@@ -142,12 +259,11 @@ void setup() {
 
     // Initialize the vision assistant (includes GPS initialization) on Core 1
     Serial.println("Initializing Vision Assistant on Core 1...");
-    if (!visionAssistant.initialize()) {
-        Serial.println("Failed to initialize Vision Assistant!");
-        while (true) {
-            delay(1000);
-        }
+    while (!visionAssistant.initialize()) {
+        Serial.println("Failed to initialize Vision Assistant! Retrying in 2 seconds...");
+        delay(2000);
     }
+    Serial.println("Vision Assistant initialized successfully!");
     
     // Start audio task on Core 0 (microphone will be initialized there)
     Serial.println("Starting audio task on Core 0...");
@@ -163,7 +279,30 @@ void setup() {
     
     if (AudioTaskHandle == NULL) {
         Serial.println("CRITICAL: Failed to create audio task!");
-        while (true) delay(1000);
+        Serial.println("This could be due to insufficient memory or system resources.");
+        Serial.println("Retrying audio task creation in 3 seconds...");
+        delay(3000);
+        
+        // Try to create the task again in a loop until it succeeds
+        while (AudioTaskHandle == NULL) {
+            Serial.println("Retrying audio task creation...");
+            xTaskCreatePinnedToCore(
+                audioTask,           // Task function
+                "AudioTask",         // Task name
+                8192,               // Stack size (increased for audio processing)
+                NULL,               // Parameters
+                2,                  // Priority (higher than main loop)
+                &AudioTaskHandle,   // Task handle
+                0                   // Core 0
+            );
+            
+            if (AudioTaskHandle == NULL) {
+                Serial.printf("Audio task creation failed. Free heap: %d bytes. Retrying in 5 seconds...\n", ESP.getFreeHeap());
+                delay(5000);
+            } else {
+                Serial.println("Audio task created successfully on retry!");
+            }
+        }
     }
     
     // Give the audio task time to initialize (increased like working demo)
@@ -368,7 +507,6 @@ void audioTask(void *pvParameters) {
 
             if (hasRealAudio) {
                 transcription = deepgramClient.transcribe(temp_buffer, AUDIO_BUFFER_SIZE);
-                transcription.toLowerCase();
                 if (!transcription.isEmpty()) {
                     Serial.println("Transcription: " + transcription);
                 }
@@ -382,11 +520,30 @@ void audioTask(void *pvParameters) {
 
             free(temp_buffer);
 
-            // Check for wake word
-            if (transcription.indexOf(WAKE_WORD) != -1) {
+            // Check for wake words (multiple variations, case insensitive, punctuation removed)
+            bool wakeWordDetected = false;
+            if (!transcription.isEmpty()) {
+                String cleanedTranscription = cleanTextForWakeWord(transcription);
+                
+                for (int i = 0; i < WAKE_WORDS_COUNT; i++) {
+                    String cleanedWakeWord = cleanTextForWakeWord(String(WAKE_WORDS[i]));
+                    if (cleanedTranscription.indexOf(cleanedWakeWord) != -1) {
+                        wakeWordDetected = true;
+                        Serial.printf("Wake word detected: '%s' matched '%s'\n", WAKE_WORDS[i], transcription.c_str());
+                        break;
+                    }
+                }
+            }
+            
+            if (wakeWordDetected) {
+                Serial.println("Wake word detected!");
+                
+                // Play confirmation ding sound
+                playDingSound();
+                
                 is_recording = true;
                 recording_start_time = millis();
-                Serial.println("Wake word detected! Recording...");
+                Serial.println("Recording...");
                 
                 if (xSemaphoreTake(audioMutex, portMAX_DELAY)) {
                     audio_buffer_index = 0; // Clear buffer to start recording new audio
