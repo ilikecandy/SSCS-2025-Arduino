@@ -31,4 +31,4 @@ void stop_microphone();
  */
 bool is_microphone_active();
 
-#endif // MICROPHONE_H
+#endif

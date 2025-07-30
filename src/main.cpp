@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <math.h>
+#include <HTTPClient.h>
 #include "vision_assistant.h"
 #include "TTS.h"
 #include "secrets.h"
@@ -15,13 +16,11 @@ bool ttsAvailable = false;
 // Wake words (multiple variations allowed)
 const char* WAKE_WORDS[] = {
     "hey centra",
-    "hi centra", 
-    "hello centra",
-    "hey central",
-    "hi central",
-    "hey center",
-    "hay centra",
-    "hey cintra"
+    "hey sentra",
+    "hi sentra",
+    "hey sentra",
+    "centra",
+    "sentra"
 };
 const int WAKE_WORDS_COUNT = sizeof(WAKE_WORDS) / sizeof(WAKE_WORDS[0]);
 
@@ -47,6 +46,8 @@ void audioTask(void *pvParameters);
 void process_audio();
 void playDingSound();
 String cleanTextForWakeWord(const String& text);
+void sendEmergencyAlert(const String& alertType, const String& description);
+void handleSystemAction(const JsonDocument& doc);
 
 // Tool call handler for system actions
 void toolHandler(const String& toolName, const String& jsonParams) {
@@ -63,42 +64,8 @@ void toolHandler(const String& toolName, const String& jsonParams) {
             return;
         }
         
-        // Extract parameters
-        String intent = doc["intent"].as<String>();
-        bool shouldSpeak = doc["shouldSpeak"].as<bool>();
-        String message = doc["message"].as<String>();
-        String logEntry = doc["logEntry"].as<String>();
-        String routeTo = doc["routeTo"].as<String>();
-        String routeParams = doc["routeParams"].as<String>();
-        
-        Serial.printf("Intent: %s\n", intent.c_str());
-        Serial.printf("Should Speak: %s\n", shouldSpeak ? "true" : "false");
-        Serial.printf("Message: %s\n", message.c_str());
-        Serial.printf("Log Entry: %s\n", logEntry.c_str());
-        Serial.printf("Route To: %s\n", routeTo.c_str());
-        Serial.printf("Route Params: %s\n", routeParams.c_str());
-        
-        // Handle speaking if required
-        if (shouldSpeak && !message.isEmpty()) {
-            if (ttsAvailable) {
-                if (!tts.speakText(message)) {
-                    Serial.println("Failed to speak message via TTS.");
-                }
-            } else {
-                Serial.println("TTS not available to speak message.");
-            }
-        }
-        
-        // Log the entry if provided
-        if (!logEntry.isEmpty()) {
-            Serial.printf("LOG: %s\n", logEntry.c_str());
-        }
-        
-        // Handle routing if specified
-        if (!routeTo.isEmpty()) {
-            Serial.printf("Routing to: %s with params: %s\n", routeTo.c_str(), routeParams.c_str());
-            // Add routing logic here as needed
-        }
+        // Handle the systemAction
+        handleSystemAction(doc);
     }
 }
 
@@ -175,6 +142,162 @@ void playDingSound() {
         Serial.println("🔔 Ding sound complete - ready for command!");
     } else {
         Serial.println("🔔 Ding sound failed but continuing - ready for command!");
+    }
+}
+
+void sendEmergencyAlert(const String& alertType, const String& description) {
+    Serial.println("🚨 Emergency protocol activated!");
+    Serial.printf("Alert Type: %s\n", alertType.c_str());
+    Serial.printf("Description: %s\n", description.c_str());
+    
+    // Get current GPS location if available
+    GPSData gpsData = visionAssistant.getCurrentGPSData();
+    String locationInfo = "Location unknown";
+    
+    if (gpsData.isValid) {
+        locationInfo = String("Lat: ") + String(gpsData.latitude, 6) + 
+                      ", Lon: " + String(gpsData.longitude, 6) + 
+                      ", Alt: " + String(gpsData.altitude, 1) + "m";
+    }
+    
+    // Create emergency alert JSON
+    JsonDocument alertDoc;
+    alertDoc["type"] = "emergency_alert";
+    alertDoc["timestamp"] = millis();
+    alertDoc["alert_type"] = alertType;
+    alertDoc["description"] = description;
+    alertDoc["location"] = locationInfo;
+    alertDoc["device_id"] = "SSCS-2025-Device";
+    alertDoc["user_status"] = "emergency_detected";
+    
+    // Convert to string
+    String jsonString;
+    serializeJson(alertDoc, jsonString);
+    
+    // Send POST request to emergency API
+    HTTPClient http;
+    http.begin(NOTIFICATIONS_UPLOAD_API_URL);
+    http.addHeader("Content-Type", "application/json");
+    
+    Serial.println("📡 Sending emergency alert to API...");
+    Serial.printf("URL: %s\n", NOTIFICATIONS_UPLOAD_API_URL);
+    Serial.printf("JSON: %s\n", jsonString.c_str());
+    
+    int httpResponseCode = http.POST(jsonString);
+    
+    if (httpResponseCode > 0) {
+        String response = http.getString();
+        Serial.printf("✅ Emergency alert sent successfully! Response code: %d\n", httpResponseCode);
+        Serial.printf("Response: %s\n", response.c_str());
+    } else {
+        Serial.printf("❌ Failed to send emergency alert. Error code: %d\n", httpResponseCode);
+        Serial.printf("Error: %s\n", http.errorToString(httpResponseCode).c_str());
+    }
+    
+    http.end();
+}
+
+void handleSystemAction(const JsonDocument& doc) {
+    // Extract parameters
+    String intent = doc["intent"].as<String>();
+    bool shouldSpeak = doc["shouldSpeak"].as<bool>();
+    String message = doc["message"].as<String>();
+    String logEntry = doc["logEntry"].as<String>();
+    String routeTo = doc["routeTo"].as<String>();
+    String routeParams = doc["routeParams"].as<String>();
+    
+    Serial.printf("Intent: %s\n", intent.c_str());
+    Serial.printf("Should Speak: %s\n", shouldSpeak ? "true" : "false");
+    Serial.printf("Message: %s\n", message.c_str());
+    Serial.printf("Log Entry: %s\n", logEntry.c_str());
+    Serial.printf("Route To: %s\n", routeTo.c_str());
+    Serial.printf("Route Params: %s\n", routeParams.c_str());
+    
+    // Handle speaking if required
+    if (shouldSpeak && !message.isEmpty()) {
+        if (ttsAvailable) {
+            if (!tts.speakText(message)) {
+                Serial.println("Failed to speak message via TTS.");
+            }
+        } else {
+            Serial.println("TTS not available to speak message.");
+        }
+    }
+    
+    // Log the entry if provided
+    if (!logEntry.isEmpty()) {
+        Serial.printf("LOG: %s\n", logEntry.c_str());
+    }
+    
+    // Handle specific intents
+    if (intent == "emergency_protocol") {
+        Serial.println("🚨 Emergency protocol detected!");
+        String alertType = "fall_detection"; // Default type
+        String description = message.isEmpty() ? "Emergency detected by vision assistant" : message;
+        
+        // Send emergency alert
+        sendEmergencyAlert(alertType, description);
+    }
+    else if (intent == "obstacle_alert") {
+        Serial.println("⚠️ Obstacle alert detected!");
+        // Log obstacle information
+        if (!logEntry.isEmpty()) {
+            Serial.printf("OBSTACLE LOG: %s\n", logEntry.c_str());
+        }
+        // Obstacle alerts should always be spoken for safety
+        if (!message.isEmpty() && ttsAvailable) {
+            tts.speakText(message);
+        }
+    }
+    else if (intent == "contextual_assistance") {
+        Serial.println("🗺️ Contextual assistance provided");
+        // Log context information
+        if (!logEntry.isEmpty()) {
+            Serial.printf("CONTEXT LOG: %s\n", logEntry.c_str());
+        }
+    }
+    else if (intent == "voice_query") {
+        Serial.println("🎤 Voice query received");
+        // Log the query for processing
+        if (!logEntry.isEmpty()) {
+            Serial.printf("QUERY LOG: %s\n", logEntry.c_str());
+        }
+        // Voice queries typically get responses
+    }
+    else if (intent == "memory_store") {
+        Serial.println("💾 Memory storage request");
+        // Log memory item
+        if (!logEntry.isEmpty()) {
+            Serial.printf("MEMORY STORED: %s\n", logEntry.c_str());
+        }
+        // Confirm storage if requested
+    }
+    else if (intent == "navigation_query") {
+        Serial.println("🧭 Navigation query received");
+        // Log navigation request
+        if (!logEntry.isEmpty()) {
+            Serial.printf("NAVIGATION LOG: %s\n", logEntry.c_str());
+        }
+    }
+    else if (intent == "hand_gesture") {
+        Serial.println("👋 Hand gesture detected");
+        // Log gesture information
+        if (!logEntry.isEmpty()) {
+            Serial.printf("GESTURE LOG: %s\n", logEntry.c_str());
+        }
+    }
+    else {
+        // Handle unknown intents
+        Serial.printf("❓ Unknown intent: %s\n", intent.c_str());
+        if (!logEntry.isEmpty()) {
+            Serial.printf("UNKNOWN INTENT LOG: %s\n", logEntry.c_str());
+        }
+    }
+    
+    // Handle routing if specified
+    if (!routeTo.isEmpty()) {
+        Serial.printf("Routing to: %s with params: %s\n", routeTo.c_str(), routeParams.c_str());
+        // Add routing logic here as needed
     }
 }
 
@@ -420,7 +543,7 @@ void audioTask(void *pvParameters) {
         }
 
         // Speech-to-text processing every 1 second
-        if (millis() - last_stt_time > 1000) {
+        if (millis() - last_stt_time > 3000) {
             last_stt_time = millis();
 
             // Check if audio buffer is allocated and has sufficient data

@@ -38,7 +38,7 @@ public:
     // Initialization
     bool initialize();
     
-    // Main update function - call this regularly in loop
+    // Main update function, called regularly in loop
     void update();
     
     // Data access
@@ -52,9 +52,9 @@ public:
     
     // Status information
     void printStatus() const;
-    void printRawData(int seconds = 10);  // Print raw NMEA data for debugging (removed const)
-    bool testBaudRates();  // Test different baud rates
+    void printRawData(int seconds = 10);
+    bool testBaudRates();
     bool isConnected() const;
 };
 
-#endif // GPS_MODULE_H
+#endif

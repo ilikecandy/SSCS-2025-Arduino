@@ -72,4 +72,4 @@ private:
     void handleWebSocketMessage(const JsonDocument& doc);
 };
 
-#endif // VISION_ASSISTANT_H
+#endif

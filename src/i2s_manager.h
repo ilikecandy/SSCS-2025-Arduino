@@ -77,4 +77,4 @@ public:
     static bool isInitialized();
 };
 
-#endif // I2S_MANAGER_H
+#endif
