@@ -1,7 +1,7 @@
 #include "TTS.h"
 #include "secrets.h"
 
-const char* TTS::DEEPGRAM_URL = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&model=aura-asteria-en";
+const char* TTS::DEEPGRAM_URL = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&model=aura-asteria-en&keywords=sentra&keyterm=sentra";
 
 TTS::TTS() : i2sInitialized(false), softwareGain(1.0), audioBuffer(nullptr) {
 }

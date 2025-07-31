@@ -40,6 +40,19 @@ volatile uint32_t buffer_sequence = 0;  // Sequence number to track buffer updat
 TaskHandle_t AudioTaskHandle = NULL;
 SemaphoreHandle_t audioMutex;
 QueueHandle_t commandQueue;
+QueueHandle_t audioCommandQueue; // For sending commands to the audio task
+
+// Enum for audio task commands
+enum class AudioCommandType {
+    SPEAK_TEXT,
+    PLAY_DING
+};
+
+// Struct for audio commands
+struct AudioCommand {
+    AudioCommandType type;
+    char text[256]; // For SPEAK_TEXT command
+};
 
 // Function declarations
 void audioTask(void *pvParameters);
@@ -70,14 +83,17 @@ void toolHandler(const String& toolName, const String& jsonParams) {
 }
 
 void playDingSound() {
-    Serial.println("🔔 Playing wake word confirmation ding...");
-    
-    // Check if microphone is active and temporarily stop it for I2S access
-    bool micWasActive = is_microphone_active();
-    if (micWasActive) {
-        Serial.println("🎤 Temporarily stopping microphone for ding sound...");
-        stop_microphone();
+    // If not on the audio core, send a command to play the ding
+    if (xPortGetCoreID() != 0) {
+        AudioCommand cmd;
+        cmd.type = AudioCommandType::PLAY_DING;
+        if (xQueueSend(audioCommandQueue, &cmd, 0) != pdTRUE) {
+            Serial.println("❌ Failed to queue PLAY_DING command");
+        }
+        return;
     }
+
+    Serial.println("🔔 Playing wake word confirmation ding...");
     
     // Generate a pleasant ding sound (two-tone chime)
     const int dingDuration = 300;  // Total duration in ms
@@ -89,12 +105,6 @@ void playDingSound() {
     uint8_t* dingBuffer = (uint8_t*)malloc(totalSamples * 2);  // 16-bit samples
     if (!dingBuffer) {
         Serial.println("❌ Failed to allocate ding buffer");
-        
-        // Restart microphone if it was active
-        if (micWasActive) {
-            Serial.println("🎤 Restarting microphone after failed ding...");
-            setup_microphone();
-        }
         return;
     }
     
@@ -127,16 +137,6 @@ void playDingSound() {
     
     // Clean up
     free(dingBuffer);
-    
-    // Restart microphone if it was active
-    if (micWasActive) {
-        Serial.println("🎤 Restarting microphone after ding sound...");
-        if (!setup_microphone()) {
-            Serial.println("❌ Failed to restart microphone after ding!");
-        } else {
-            Serial.println("🎤 Microphone restarted successfully");
-        }
-    }
     
     if (dingSuccess) {
         Serial.println("🔔 Ding sound complete - ready for command!");
@@ -216,8 +216,13 @@ void handleSystemAction(const JsonDocument& doc) {
     // Handle speaking if required
     if (shouldSpeak && !message.isEmpty()) {
         if (ttsAvailable) {
-            if (!tts.speakText(message)) {
-                Serial.println("Failed to speak message via TTS.");
+            AudioCommand cmd;
+            cmd.type = AudioCommandType::SPEAK_TEXT;
+            strncpy(cmd.text, message.c_str(), sizeof(cmd.text) - 1);
+            cmd.text[sizeof(cmd.text) - 1] = '\0'; // Ensure null termination
+            
+            if (xQueueSend(audioCommandQueue, &cmd, 0) != pdTRUE) {
+                Serial.println("❌ Failed to queue SPEAK_TEXT command");
             }
         } else {
             Serial.println("TTS not available to speak message.");
@@ -338,8 +343,9 @@ void setup() {
     // Create synchronization primitives
     audioMutex = xSemaphoreCreateMutex();
     commandQueue = xQueueCreate(5, sizeof(String));
+    audioCommandQueue = xQueueCreate(5, sizeof(AudioCommand)); // Create audio command queue
     
-    if (!audioMutex || !commandQueue) {
+    if (!audioMutex || !commandQueue || !audioCommandQueue) {
         Serial.println("CRITICAL: Failed to create synchronization primitives!");
         while (true) delay(1000);
     }
@@ -536,6 +542,27 @@ void audioTask(void *pvParameters) {
     unsigned long recording_start_time = 0;
     
     while (true) {
+        // Check for commands from the main core
+        AudioCommand receivedCmd;
+        if (xQueueReceive(audioCommandQueue, &receivedCmd, 0) == pdTRUE) {
+            bool micWasActive = is_microphone_active();
+            if (micWasActive) {
+                stop_microphone();
+            }
+
+            if (receivedCmd.type == AudioCommandType::SPEAK_TEXT) {
+                Serial.printf("🎤 Audio task received SPEAK_TEXT: \"%s\"\n", receivedCmd.text);
+                tts.speakText(String(receivedCmd.text));
+            } else if (receivedCmd.type == AudioCommandType::PLAY_DING) {
+                Serial.println("🎤 Audio task received PLAY_DING");
+                playDingSound();
+            }
+
+            if (micWasActive) {
+                setup_microphone();
+            }
+        }
+
         // Process audio data
         if (audio_buffer && xSemaphoreTake(audioMutex, portMAX_DELAY)) {
             process_audio();

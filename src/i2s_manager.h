@@ -2,10 +2,11 @@
 #define I2S_MANAGER_H
 
 #include <driver/i2s.h>
-// I2S Pin Configuration (shared between microphone and speaker)
-#define I2S_SERIAL_CLOCK     GPIO_NUM_14  // SCK - Serial Clock
-#define I2S_LEFT_RIGHT_CLOCK GPIO_NUM_13  // WS - Word Select
-#define I2S_SERIAL_DATA      GPIO_NUM_2   // SD - Serial Data
+// I2S Pin Configuration
+#define I2S_MIC_SERIAL_CLOCK    GPIO_NUM_14  // SCK - Serial Clock for Microphone
+#define I2S_SPEAKER_SERIAL_CLOCK GPIO_NUM_12 // SCK - Serial Clock for Speaker
+#define I2S_LEFT_RIGHT_CLOCK    GPIO_NUM_13  // WS - Word Select (Shared)
+#define I2S_SERIAL_DATA         GPIO_NUM_2   // SD - Serial Data (Shared)
 #include <Arduino.h>
 
 enum class I2SDevice {
