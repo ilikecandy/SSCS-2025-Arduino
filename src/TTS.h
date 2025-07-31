@@ -26,6 +26,7 @@ private:
     
     bool i2sInitialized;
     String deepgramApiKey;
+    String defaultLanguage;
     
     // Audio gain control
     float softwareGain;  // Software gain multiplier (0.0 to 2.0)
@@ -43,9 +44,13 @@ public:
     
     // Main TTS function
     bool speakText(const String& text);
+    bool speakText(const String& text, const String& language);
     
     // Lazy initialization - try to initialize if not already done
     bool ensureInitialized();
+    
+    // Language configuration
+    void setDefaultLanguage(const String& language);
     
     // Audio playback control
     bool playAudioData(const uint8_t* audioData, size_t dataSize);
@@ -67,7 +72,9 @@ private:
     // Internal methods
     bool initializeI2S();
     bool callDeepgramAPI(const String& text, uint8_t** audioData, size_t* dataSize);
+    bool callDeepgramAPI(const String& text, const String& language, uint8_t** audioData, size_t* dataSize);
     bool streamDeepgramAPI(const String& text);  // Streaming method for raw PCM
+    bool streamDeepgramAPI(const String& text, const String& language);  // Streaming method with language
     void cleanupAudioData(uint8_t* audioData);
     void applySoftwareGain(uint8_t* audioData, size_t dataSize);  // Apply software gain to audio data
     

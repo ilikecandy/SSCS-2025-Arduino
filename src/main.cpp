@@ -6,19 +6,18 @@
 #include "secrets.h"
 #include "microphone.h"
 #include "deepgram_client.h"
+#include "settings_manager.h"
 #include <ArduinoJson.h>
 
 VisionAssistant visionAssistant;
 TTS tts;
 DeepgramClient deepgramClient(DEEPGRAM_API_KEY);
+SettingsManager settingsManager(NOTIFICATIONS_API_URL);
 bool ttsAvailable = false;
 
-// Wake words (multiple variations allowed)
+// Wake words (optimized for Deepgram's acoustic search - longer phrases work better)
 const char* WAKE_WORDS[] = {
     "halo",
-    "hey halo",
-    "hey heylo",
-    "heylo",
 };
 const int WAKE_WORDS_COUNT = sizeof(WAKE_WORDS) / sizeof(WAKE_WORDS[0]);
 
@@ -59,6 +58,7 @@ void playDingSound();
 String cleanTextForWakeWord(const String& text);
 void sendEmergencyAlert(const String& alertType, const String& description);
 void handleSystemAction(const JsonDocument& doc);
+void initializeLanguageSettings();
 
 // Tool call handler for system actions
 void toolHandler(const String& toolName, const String& jsonParams) {
@@ -321,6 +321,32 @@ String cleanTextForWakeWord(const String& text) {
     return cleaned;
 }
 
+void initializeLanguageSettings() {
+    Serial.println("🌐 Initializing language settings...");
+    
+    // Check WiFi connection first
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("⚠️ WiFi not connected, using default language (en)");
+        return;
+    }
+    
+    // Fetch settings from API
+    UserSettings settings = settingsManager.getSettings();
+    if (settings.isValid) {
+        String language = settings.language;
+        Serial.printf("✅ Language setting retrieved: %s\n", language.c_str());
+        
+        // Set language for both STT and TTS
+        deepgramClient.setDefaultLanguage(language);
+        tts.setDefaultLanguage(language);
+        
+        Serial.printf("🎤 Deepgram STT language set to: %s\n", language.c_str());
+        Serial.printf("🔊 Deepgram TTS language set to: %s\n", language.c_str());
+    } else {
+        Serial.println("⚠️ Failed to fetch language settings, using defaults");
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     Serial.println("Starting setup...");
@@ -381,6 +407,9 @@ void setup() {
         delay(2000);
     }
     Serial.println("Vision Assistant initialized successfully!");
+    
+    // Initialize language settings after WiFi is connected
+    initializeLanguageSettings();
     
     // Start audio task on Core 0 (microphone will be initialized there)
     Serial.println("Starting audio task on Core 0...");
@@ -574,7 +603,9 @@ void audioTask(void *pvParameters) {
             xSemaphoreGive(audioMutex);
         }
 
-        // Speech-to-text processing every 1 second
+        // Speech-to-text processing every 3 seconds for wake word detection
+        // Note: Wake word detection uses Deepgram's search API for acoustic pattern matching
+        // Command transcription after wake word still uses regular transcription API
         if (millis() - last_stt_time > 3000) {
             last_stt_time = millis();
 
@@ -654,7 +685,6 @@ void audioTask(void *pvParameters) {
 
             // Only transcribe if we have enough real audio data (not just zeros)
             bool hasRealAudio = false;
-            String transcription = ""; // Declare transcription variable here
             int16_t* samples = (int16_t*)temp_buffer;
             int sampleCount = AUDIO_BUFFER_SIZE / 2;
             for (int i = 0; i < sampleCount; i++) {
@@ -664,39 +694,23 @@ void audioTask(void *pvParameters) {
                 }
             }
 
+            bool wakeWordDetected = false;
             if (hasRealAudio) {
-                transcription = deepgramClient.transcribe(temp_buffer, AUDIO_BUFFER_SIZE);
-                if (!transcription.isEmpty()) {
-                    Serial.println("Transcription: " + transcription);
+                // Use Deepgram's search API for wake word detection instead of transcription
+                Serial.println("🔍 Searching for wake words using Deepgram search API...");
+                wakeWordDetected = deepgramClient.searchForWakeWords(temp_buffer, AUDIO_BUFFER_SIZE, WAKE_WORDS, WAKE_WORDS_COUNT, 0.3f);
+                
+                if (wakeWordDetected) {
+                    Serial.println("✅ Wake word detected via search API!");
                 }
             } else {
-                // static unsigned long lastNoAudioReport = 0;
-                // if (millis() - lastNoAudioReport > 2000) { // Report every 2 seconds
-                Serial.println("No real audio detected in buffer, skipping transcription");
-                //     lastNoAudioReport = millis();
-                // }
-                // } else {}
+                Serial.println("No real audio detected in buffer, skipping wake word search");
             }
 
             free(temp_buffer);
 
-            // Check for wake words (multiple variations, case insensitive, punctuation removed)
-            bool wakeWordDetected = false;
-            if (!transcription.isEmpty()) {
-                String cleanedTranscription = cleanTextForWakeWord(transcription);
-                
-                for (int i = 0; i < WAKE_WORDS_COUNT; i++) {
-                    String cleanedWakeWord = cleanTextForWakeWord(String(WAKE_WORDS[i]));
-                    if (cleanedTranscription.indexOf(cleanedWakeWord) != -1) {
-                        wakeWordDetected = true;
-                        Serial.printf("Wake word detected: '%s' matched '%s'\n", WAKE_WORDS[i], transcription.c_str());
-                        break;
-                    }
-                }
-            }
-            
             if (wakeWordDetected) {
-                Serial.println("Wake word detected!");
+                Serial.println("🎙️ Wake word detected via Deepgram search API!");
                 
                 // First, force stop the microphone to ensure I2S is freed up for the ding sound
                 stop_microphone();
@@ -799,6 +813,18 @@ void loop() {
             Serial.println("GPS Status: No fix obtained");
         }
         lastGPSStatus = millis();
+    }
+    
+    // Refresh language settings every 5 minutes
+    static unsigned long lastLanguageUpdate = 0;
+    if (millis() - lastLanguageUpdate > 300000) { // 5 minutes
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println("🔄 Refreshing language settings...");
+            String currentLanguage = settingsManager.getLanguage();
+            deepgramClient.setDefaultLanguage(currentLanguage);
+            tts.setDefaultLanguage(currentLanguage);
+        }
+        lastLanguageUpdate = millis();
     }
     
     // Small delay to prevent watchdog issues

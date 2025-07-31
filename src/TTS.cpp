@@ -3,7 +3,7 @@
 
 const char* TTS::DEEPGRAM_URL = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&model=aura-asteria-en&keywords=halo&keyterm=halo";
 
-TTS::TTS() : i2sInitialized(false), softwareGain(1.0), audioBuffer(nullptr) {
+TTS::TTS() : i2sInitialized(false), softwareGain(1.0), audioBuffer(nullptr), defaultLanguage("en-US") {
 }
 
 TTS::~TTS() {
@@ -37,6 +37,10 @@ bool TTS::initialize(const String& apiKey) {
 }
 
 bool TTS::speakText(const String& text) {
+    return speakText(text, defaultLanguage);
+}
+
+bool TTS::speakText(const String& text, const String& language) {
     if (text.isEmpty()) {
         Serial.println("TTS: Empty text provided");
         return false;
@@ -55,7 +59,7 @@ bool TTS::speakText(const String& text) {
         return false;
     }
     
-    Serial.printf("TTS: Speaking text: %s\n", text.c_str());
+    Serial.printf("TTS: Speaking text: %s (language: %s)\n", text.c_str(), language.c_str());
     
     // Download entire audio into memory before playing
     uint8_t* audioData = nullptr;
@@ -64,7 +68,7 @@ bool TTS::speakText(const String& text) {
     Serial.println("🔄 Requesting audio synthesis from Deepgram...");
     unsigned long startTime = millis();
     
-    if (!callDeepgramAPI(text, &audioData, &dataSize)) {
+    if (!callDeepgramAPI(text, language, &audioData, &dataSize)) {
         Serial.println("TTS: Failed to download audio from Deepgram");
         releaseSpeakerAccess();
         return false;
@@ -94,8 +98,8 @@ bool TTS::speakText(const String& text) {
     return playResult;
 }
 
-bool TTS::streamDeepgramAPI(const String& text) {
-    Serial.printf("🤖 Synthesizing with Deepgram TTS (streaming): \"%s\"\n", text.c_str());
+bool TTS::streamDeepgramAPI(const String& text, const String& language) {
+    Serial.printf("🤖 Synthesizing with Deepgram TTS (streaming): \"%s\" (language: %s)\n", text.c_str(), language.c_str());
 
     if (deepgramApiKey.length() < 10) {
         Serial.println("❌ Deepgram API key is not set or too short");
@@ -129,7 +133,26 @@ bool TTS::streamDeepgramAPI(const String& text) {
         // client.setNoDelay(true);   // Temporarily commented out to avoid socket errors
     }
 
-    http.begin(client, DEEPGRAM_URL);
+    // Build URL with language parameter
+    String deepgramUrl = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&keywords=halo&keyterm=halo";
+    
+    // Add model based on language
+    if (language == "es" || language == "spanish") {
+        deepgramUrl += "&model=aura-asteria-es";
+    } else if (language == "fr" || language == "french") {
+        deepgramUrl += "&model=aura-asteria-fr";
+    } else if (language == "de" || language == "german") {
+        deepgramUrl += "&model=aura-asteria-de";
+    } else if (language == "pt" || language == "portuguese") {
+        deepgramUrl += "&model=aura-asteria-pt";
+    } else if (language == "it" || language == "italian") {
+        deepgramUrl += "&model=aura-asteria-it";
+    } else {
+        // Default to English
+        deepgramUrl += "&model=aura-asteria-en";
+    }
+
+    http.begin(client, deepgramUrl);
     http.addHeader("Content-Type", "application/json");
     String authHeader = "Token " + deepgramApiKey;
     http.addHeader("Authorization", authHeader);
@@ -297,7 +320,11 @@ void TTS::releaseSpeakerAccess() {
 }
 
 bool TTS::callDeepgramAPI(const String& text, uint8_t** audioData, size_t* dataSize) {
-    Serial.printf("🤖 Calling Deepgram TTS API: \"%s\"\n", text.c_str());
+    return callDeepgramAPI(text, defaultLanguage, audioData, dataSize);
+}
+
+bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** audioData, size_t* dataSize) {
+    Serial.printf("🤖 Calling Deepgram TTS API: \"%s\" (language: %s)\n", text.c_str(), language.c_str());
 
     if (deepgramApiKey.length() < 10) {
         Serial.println("❌ Deepgram API key is not set or too short");
@@ -323,7 +350,26 @@ bool TTS::callDeepgramAPI(const String& text, uint8_t** audioData, size_t* dataS
         // client.setNoDelay(true);   // Temporarily commented out to avoid socket errors
     }
     
-    http.begin(client, DEEPGRAM_URL);
+    // Build URL with language parameter
+    String deepgramUrl = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&keywords=halo&keyterm=halo";
+    
+    // Add model based on language
+    if (language == "es" || language == "spanish") {
+        deepgramUrl += "&model=aura-asteria-es";
+    } else if (language == "fr" || language == "french") {
+        deepgramUrl += "&model=aura-asteria-fr";
+    } else if (language == "de" || language == "german") {
+        deepgramUrl += "&model=aura-asteria-de";
+    } else if (language == "pt" || language == "portuguese") {
+        deepgramUrl += "&model=aura-asteria-pt";
+    } else if (language == "it" || language == "italian") {
+        deepgramUrl += "&model=aura-asteria-it";
+    } else {
+        // Default to English
+        deepgramUrl += "&model=aura-asteria-en";
+    }
+
+    http.begin(client, deepgramUrl);
     http.addHeader("Content-Type", "application/json");
     String authHeader = "Token " + deepgramApiKey;
     http.addHeader("Authorization", authHeader);
@@ -724,4 +770,9 @@ void TTS::optimizeWiFiForSpeed() {
     Serial.println("   - 802.11n (2.4GHz) or 802.11ac (5GHz)");
     Serial.println("   - 40MHz channel width");
     Serial.println("   - Low network congestion");
+}
+
+void TTS::setDefaultLanguage(const String& language) {
+    defaultLanguage = language;
+    Serial.printf("TTS default language set to: %s\n", language.c_str());
 }
