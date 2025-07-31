@@ -10,6 +10,6 @@ extern const char* GEMINI_API_KEY;
 
 extern const char* DEEPGRAM_API_KEY;
 
-extern const char* NOTIFICATIONS_UPLOAD_API_URL;
+extern const char* NOTIFICATIONS_API_URL;
 
 #endif

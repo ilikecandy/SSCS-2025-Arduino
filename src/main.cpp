@@ -15,12 +15,10 @@ bool ttsAvailable = false;
 
 // Wake words (multiple variations allowed)
 const char* WAKE_WORDS[] = {
-    "hey centra",
-    "hey sentra",
-    "hi sentra",
-    "hey sentra",
-    "centra",
-    "sentra"
+    "halo",
+    "hey halo",
+    "hey heylo",
+    "heylo",
 };
 const int WAKE_WORDS_COUNT = sizeof(WAKE_WORDS) / sizeof(WAKE_WORDS[0]);
 
@@ -83,16 +81,6 @@ void toolHandler(const String& toolName, const String& jsonParams) {
 }
 
 void playDingSound() {
-    // If not on the audio core, send a command to play the ding
-    if (xPortGetCoreID() != 0) {
-        AudioCommand cmd;
-        cmd.type = AudioCommandType::PLAY_DING;
-        if (xQueueSend(audioCommandQueue, &cmd, 0) != pdTRUE) {
-            Serial.println("❌ Failed to queue PLAY_DING command");
-        }
-        return;
-    }
-
     Serial.println("🔔 Playing wake word confirmation ding...");
     
     // Generate a pleasant ding sound (two-tone chime)
@@ -124,12 +112,12 @@ void playDingSound() {
         samples[samplesPerTone + i] = (int16_t)(amplitude * 8000 * sin(2 * PI * 1000 * t));
     }
     
-    // Play the ding sound
+    // Use TTS to play the ding sound (TTS handles I2S management properly)
     bool dingSuccess = false;
     if (ttsAvailable) {
         dingSuccess = tts.playAudioData(dingBuffer, totalSamples * 2);
         if (!dingSuccess) {
-            Serial.println("❌ Failed to play ding sound");
+            Serial.println("❌ Failed to play ding sound via TTS");
         }
     } else {
         Serial.println("❌ TTS not available for ding sound");
@@ -176,11 +164,11 @@ void sendEmergencyAlert(const String& alertType, const String& description) {
     
     // Send POST request to emergency API
     HTTPClient http;
-    http.begin(NOTIFICATIONS_UPLOAD_API_URL);
+    http.begin(String(NOTIFICATIONS_API_URL) + "/upload");
     http.addHeader("Content-Type", "application/json");
     
     Serial.println("📡 Sending emergency alert to API...");
-    Serial.printf("URL: %s\n", NOTIFICATIONS_UPLOAD_API_URL);
+    Serial.printf("URL: %s\n", String(NOTIFICATIONS_API_URL) + "/upload");
     Serial.printf("JSON: %s\n", jsonString.c_str());
     
     int httpResponseCode = http.POST(jsonString);
@@ -482,6 +470,23 @@ void process_audio() {
     if (result == ESP_OK && bytes_read > 0) {
         int samples_read = bytes_read / sizeof(int32_t);
         
+        // Debug: Log microphone reading stats occasionally
+        static unsigned long last_read_debug = 0;
+        static int total_reads = 0;
+        static size_t total_bytes = 0;
+        total_reads++;
+        total_bytes += bytes_read;
+        
+        if (millis() - last_read_debug > 5000) {  // Every 5 seconds
+            float avg_bytes_per_read = (float)total_bytes / total_reads;
+            float effective_sample_rate = (total_bytes / sizeof(int32_t)) / ((millis() - last_read_debug) / 1000.0);
+            Serial.printf("🎤 Mic stats: %d reads, avg %.1f bytes/read, ~%.0f samples/sec\n", 
+                         total_reads, avg_bytes_per_read, effective_sample_rate);
+            last_read_debug = millis();
+            total_reads = 0;
+            total_bytes = 0;
+        }
+        
         // Ensure we don't overflow the audio buffer
         for (int i = 0; i < samples_read; i++) {
             // Convert 32-bit sample to 16-bit (same as working demo)
@@ -573,12 +578,12 @@ void audioTask(void *pvParameters) {
         if (millis() - last_stt_time > 3000) {
             last_stt_time = millis();
 
-            // Check if audio buffer is allocated and has sufficient data
-            if (!audio_buffer || audio_buffer_index < 16000) {
+            // Check if audio buffer is allocated and has sufficient data (use buffer wrap or minimum threshold)
+            if (!audio_buffer || (!buffer_has_wrapped && audio_buffer_index < 8000)) {
                 // Add debug info about buffer state
                 static unsigned long last_debug = 0;
                 if (millis() - last_debug > 10000) {  // Debug every 10 seconds
-                    Serial.printf("Audio buffer state: allocated=%s, index=%d, required=16000\n", 
+                    Serial.printf("Audio buffer state: allocated=%s, index=%d, required=8000\n", 
                                 audio_buffer ? "yes" : "no", audio_buffer_index);
                     
                     // Show some sample values to see if we're getting real audio data
@@ -587,6 +592,10 @@ void audioTask(void *pvParameters) {
                         Serial.printf("Sample audio values: %d, %d, %d, %d, %d\n", 
                                     samples[0], samples[1], samples[10], samples[50], samples[100]);
                     }
+                    
+                    // Check if buffer is wrapping too frequently
+                    Serial.printf("Buffer wrap status: wrapped=%s, sequence=%u\n", 
+                                buffer_has_wrapped ? "yes" : "no", buffer_sequence);
                     last_debug = millis();
                 }
                 continue;
@@ -661,11 +670,12 @@ void audioTask(void *pvParameters) {
                     Serial.println("Transcription: " + transcription);
                 }
             } else {
-                static unsigned long lastNoAudioReport = 0;
-                if (millis() - lastNoAudioReport > 30000) { // Report every 30 seconds
-                    Serial.println("No real audio detected in buffer, skipping transcription");
-                    lastNoAudioReport = millis();
-                }
+                // static unsigned long lastNoAudioReport = 0;
+                // if (millis() - lastNoAudioReport > 2000) { // Report every 2 seconds
+                Serial.println("No real audio detected in buffer, skipping transcription");
+                //     lastNoAudioReport = millis();
+                // }
+                // } else {}
             }
 
             free(temp_buffer);
@@ -688,8 +698,15 @@ void audioTask(void *pvParameters) {
             if (wakeWordDetected) {
                 Serial.println("Wake word detected!");
                 
-                // Play confirmation ding sound
+                // First, force stop the microphone to ensure I2S is freed up for the ding sound
+                stop_microphone();
+                I2SManager::forceReleaseI2SAccess(); // Force release any lingering I2S access
+                
+                // Play confirmation ding sound (now that I2S is free)
                 playDingSound();
+                
+                // Restart the microphone for recording the command
+                setup_microphone();
                 
                 is_recording = true;
                 recording_start_time = millis();

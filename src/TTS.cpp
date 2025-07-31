@@ -1,7 +1,7 @@
 #include "TTS.h"
 #include "secrets.h"
 
-const char* TTS::DEEPGRAM_URL = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&model=aura-asteria-en&keywords=sentra&keyterm=sentra";
+const char* TTS::DEEPGRAM_URL = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&model=aura-asteria-en&keywords=halo&keyterm=halo";
 
 TTS::TTS() : i2sInitialized(false), softwareGain(1.0), audioBuffer(nullptr) {
 }
@@ -471,9 +471,21 @@ bool TTS::callDeepgramAPI(const String& text, uint8_t** audioData, size_t* dataS
 }
 
 bool TTS::playAudioData(const uint8_t* audioData, size_t dataSize) {
+    // Track if we had to request speaker access (meaning we need to release it afterwards)
+    bool requestedAccess = false;
+    
+    // Request speaker access first, force if necessary
     if (!I2SManager::hasI2SAccess(I2SDevice::SPEAKER)) {
-        Serial.println("TTS: No I2S access for speaker");
-        return false;
+        Serial.println("TTS: Requesting speaker access for audio playback...");
+        requestedAccess = true;
+        if (!requestSpeakerAccess()) {
+            Serial.println("TTS: Normal speaker access failed, forcing I2S release...");
+            I2SManager::forceReleaseI2SAccess();
+            if (!requestSpeakerAccess()) {
+                Serial.println("TTS: Failed to get speaker access even after force release");
+                return false;
+            }
+        }
     }
     
     if (!i2sInitialized) {
@@ -579,6 +591,12 @@ bool TTS::playAudioData(const uint8_t* audioData, size_t dataSize) {
     // Clean up processed audio data if we created a copy
     if (processedAudioData != nullptr) {
         free(processedAudioData);
+    }
+    
+    // If we requested access for this playback, release it so microphone can use I2S again
+    if (requestedAccess) {
+        Serial.println("TTS: Releasing speaker access after ding playback");
+        releaseSpeakerAccess();
     }
     
     return totalWritten == dataSize;

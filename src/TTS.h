@@ -11,8 +11,8 @@
 
 class TTS {
 private:
-    // I2S pins for MAX98357A
-    static const int BCLK_PIN = 14;
+    // I2S pins for MAX98357A (Speaker uses pin 12 for clock, mic uses pin 14)
+    static const int BCLK_PIN = 12;  // Changed from 14 to 12 to match I2S_SPEAKER_SERIAL_CLOCK
     static const int LRCLK_PIN = 13;
     static const int DATA_PIN = 2;
     
