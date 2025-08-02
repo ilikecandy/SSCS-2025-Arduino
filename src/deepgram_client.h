@@ -33,7 +33,8 @@ private:
     String extractTranscript(const String& response);
     
     // Helper function to extract search results from Deepgram response
-    bool extractSearchResults(const String& response, const String& searchTerm, float minConfidence = 0.5);
+    // TODO INCREASE CONFIDENCE
+    bool extractSearchResults(const String& response, const String& searchTerm, float minConfidence = 0.80f);
 
 public:
     DeepgramClient(const char* api_key);

@@ -51,7 +51,8 @@ QueueHandle_t audioCommandQueue; // For sending commands to the audio task
 // Enum for audio task commands
 enum class AudioCommandType {
     SPEAK_TEXT,
-    PLAY_DING
+    PLAY_DING,
+    PLAY_BUTTON_DING
 };
 
 // Struct for audio commands
@@ -69,6 +70,7 @@ struct CommandMessage {
 void audioTask(void *pvParameters);
 void process_audio();
 void playDingSound();
+void playButtonDingSound();
 String cleanTextForWakeWord(const String& text);
 void sendEmergencyAlert(const String& alertType, const String& description);
 void handleSystemAction(const JsonDocument& doc);
@@ -146,6 +148,52 @@ void playDingSound() {
         Serial.println("🔔 Ding sound complete - ready for command!");
     } else {
         Serial.println("🔔 Ding sound failed but continuing - ready for command!");
+    }
+}
+
+void playButtonDingSound() {
+    Serial.println("🔘 Playing command transcribed button ding...");
+    
+    // Generate a single-tone button click sound (shorter than wake word ding)
+    const int dingDuration = 150;  // Shorter duration for button feedback
+    const int sampleRate = 16000;
+    const int totalSamples = (sampleRate * dingDuration) / 1000;
+    
+    // Allocate buffer for button ding sound
+    uint8_t* dingBuffer = (uint8_t*)malloc(totalSamples * 2);  // 16-bit samples
+    if (!dingBuffer) {
+        Serial.println("❌ Failed to allocate button ding buffer");
+        return;
+    }
+    
+    int16_t* samples = (int16_t*)dingBuffer;
+    
+    // Generate single tone (1200 Hz - higher pitch than wake word ding)
+    for (int i = 0; i < totalSamples; i++) {
+        float t = (float)i / sampleRate;
+        float amplitude = 0.25f * (1.0f - t * 6.67f);  // Quick fade out
+        if (amplitude < 0) amplitude = 0;
+        samples[i] = (int16_t)(amplitude * 6000 * sin(2 * PI * 1200 * t));
+    }
+    
+    // Use TTS to play the button ding sound
+    bool dingSuccess = false;
+    if (ttsAvailable) {
+        dingSuccess = tts.playAudioData(dingBuffer, totalSamples * 2);
+        if (!dingSuccess) {
+            Serial.println("❌ Failed to play button ding sound via TTS");
+        }
+    } else {
+        Serial.println("❌ TTS not available for button ding sound");
+    }
+    
+    // Clean up
+    free(dingBuffer);
+    
+    if (dingSuccess) {
+        Serial.println("🔘 Button ding complete - command transcribed!");
+    } else {
+        Serial.println("🔘 Button ding failed but continuing - command transcribed!");
     }
 }
 
@@ -684,6 +732,9 @@ void audioTask(void *pvParameters) {
             } else if (receivedCmd.type == AudioCommandType::PLAY_DING) {
                 Serial.println("🎤 Audio task received PLAY_DING");
                 playDingSound();
+            } else if (receivedCmd.type == AudioCommandType::PLAY_BUTTON_DING) {
+                Serial.println("🎤 Audio task received PLAY_BUTTON_DING");
+                playButtonDingSound();
             }
 
             if (micWasActive) {
@@ -799,7 +850,8 @@ void audioTask(void *pvParameters) {
             if (hasRealAudio) {
                 // Use Deepgram's search API for wake word detection instead of transcription
                 Serial.println("🔍 Searching for wake words using Deepgram search API...");
-                wakeWordDetected = deepgramClient.searchForWakeWords(temp_buffer, WAKE_WORD_BUFFER_SIZE, WAKE_WORDS, WAKE_WORDS_COUNT, 0.5f);
+                // TODO INCREASE CONFIDENCE
+                wakeWordDetected = deepgramClient.searchForWakeWords(temp_buffer, WAKE_WORD_BUFFER_SIZE, WAKE_WORDS, WAKE_WORDS_COUNT, 0.80f);
                 
                 if (wakeWordDetected) {
                     Serial.println("✅ Wake word detected via search API!");
@@ -857,7 +909,7 @@ void audioTask(void *pvParameters) {
             if (baseline_calculated && millis() - recording_start_time > 3000) { // Wait 3 seconds before checking silence
                 static unsigned long lastSilenceCheck = 0;
                 static int consecutiveSilentChecks = 0; // Track consecutive silent readings
-                const int requiredSilentChecks = 5; // Need 5 consecutive checks (1 second total)
+                const int requiredSilentChecks = 3; // Need 3 consecutive checks (0.6 seconds total)
                 
                 if (millis() - lastSilenceCheck > 200) { // Check every 200ms
                     if (xSemaphoreTake(audioMutex, portMAX_DELAY)) {
@@ -971,6 +1023,14 @@ void loop() {
     CommandMessage cmdMsg;
     if (xQueueReceive(commandQueue, &cmdMsg, 0) == pdTRUE) {
         Serial.printf("Received command from audio core: %s\n", cmdMsg.command);
+        
+        // Play button ding sound to indicate command was transcribed and is being processed
+        AudioCommand buttonDingCmd;
+        buttonDingCmd.type = AudioCommandType::PLAY_BUTTON_DING;
+        if (xQueueSend(audioCommandQueue, &buttonDingCmd, 0) != pdTRUE) {
+            Serial.println("❌ Failed to queue PLAY_BUTTON_DING command");
+        }
+        
         visionAssistant.sendTextMessage(String(cmdMsg.command)); // Convert to String only when needed locally
     }
 

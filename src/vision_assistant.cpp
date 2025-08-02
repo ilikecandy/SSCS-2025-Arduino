@@ -10,7 +10,7 @@
 
 VisionAssistant *VisionAssistant::instance = nullptr;
 
-VisionAssistant::VisionAssistant() : setupComplete(false), systemPromptSent(false), lastFrameTime(0), lastGPSUpdate(0), responseCallback(nullptr), toolCallback(nullptr) {
+VisionAssistant::VisionAssistant() : setupComplete(false), systemPromptSent(false), lastFrameTime(0), lastGPSUpdate(0), responseCallback(nullptr), toolCallback(nullptr), queueHead(0), queueTail(0), queueSize(0) {
     instance = this;  // Set static instance for callbacks
 }
 
@@ -126,6 +126,13 @@ void VisionAssistant::processFrame() {
         msg += "{\"text\":\"" + gpsText + "\"},";
     }
     
+    // Check for queued user commands and include them
+    if (hasQueuedCommands()) {
+        String userCommand = getNextQueuedCommand();
+        Serial.printf("Including queued user command: %s\n", userCommand.c_str());
+        msg += "{\"text\":\"USER VOICE COMMAND: " + userCommand + "\"},";
+    }
+    
     // Add image data
     msg += "{\"inline_data\":{\"mime_type\":\"image/jpeg\",\"data\":\"" + frameB64 + "\"}}";
     msg += "]}]}}";
@@ -193,7 +200,7 @@ void VisionAssistant::sendSetupMessage() {
     // NOTE: This should be set to low only when testing.
     // const char* mediaResolution = "MEDIA_RESOLUTION_HIGH";
     const char* mediaResolution = "MEDIA_RESOLUTION_LOW";
-    String setupMsg = "{\"setup\":{\"model\":\"models/gemini-2.5-flash-live-preview\",\"generationConfig\":{\"responseModalities\":[\"TEXT\"], \"mediaResolution\":\"" + String(mediaResolution) + "\"},\"tools\":[" + String(TOOLS_JSON) + "],\"systemInstruction\":{\"parts\":[{\"text\":\"" + String(SYSTEM_PROMPT) + "\"}]}}}";
+    String setupMsg = "{\"setup\":{\"model\":\"models/gemini-gemini-2.0-flash-live-001\",\"generationConfig\":{\"responseModalities\":[\"TEXT\"], \"mediaResolution\":\"" + String(mediaResolution) + "\"},\"tools\":[" + String(TOOLS_JSON) + "],\"systemInstruction\":{\"parts\":[{\"text\":\"" + String(SYSTEM_PROMPT) + "\"}]}}}";
     ws.sendTXT(setupMsg);
     Serial.println("Sent setup message");
 }
@@ -369,18 +376,48 @@ void VisionAssistant::onGeminiResponse(const String &response) {
     Serial.println("Default response handler - response already processed");
 }
 
+void VisionAssistant::queueUserCommand(const String& command) {
+    if (queueSize >= MAX_QUEUED_COMMANDS) {
+        Serial.println("Command queue full - dropping oldest command");
+        // Remove oldest command (FIFO)
+        queueHead = (queueHead + 1) % MAX_QUEUED_COMMANDS;
+        queueSize--;
+    }
+    
+    // Add new command to tail
+    commandQueue[queueTail].message = command;
+    commandQueue[queueTail].timestamp = millis();
+    queueTail = (queueTail + 1) % MAX_QUEUED_COMMANDS;
+    queueSize++;
+    
+    Serial.printf("Queued command: %s (queue size: %d)\n", command.c_str(), queueSize);
+}
+
+bool VisionAssistant::hasQueuedCommands() const {
+    return queueSize > 0;
+}
+
+String VisionAssistant::getNextQueuedCommand() {
+    if (queueSize == 0) {
+        return "";
+    }
+    
+    String command = commandQueue[queueHead].message;
+    queueHead = (queueHead + 1) % MAX_QUEUED_COMMANDS;
+    queueSize--;
+    
+    Serial.printf("Dequeued command: %s (remaining: %d)\n", command.c_str(), queueSize);
+    return command;
+}
+
 void VisionAssistant::sendTextMessage(const String& message) {
     if (!setupComplete) {
-        Serial.println("WebSocket not ready to send text message.");
+        Serial.println("WebSocket not ready - queueing user command for next frame.");
+        queueUserCommand(message);
         return;
     }
 
-    String msg = "{\"client_content\":{\"turn_complete\":true,\"turns\":[{\"role\":\"user\",\"parts\":[{\"text\":\"" + message + "\"}]}]}}";
-
-    bool sent = ws.sendTXT(msg);
-    if (!sent) {
-        Serial.println("Failed to send text message to Gemini");
-    } else {
-        Serial.printf("Sent text message: %s\n", message.c_str());
-    }
+    // Queue the user command to be sent with the next frame
+    queueUserCommand(message);
+    Serial.printf("Queued user command for next frame: %s\n", message.c_str());
 }

@@ -27,8 +27,19 @@ private:
     ResponseCallback responseCallback;
     ToolCallback toolCallback;
     
+    // Queue system for user commands
+    struct QueuedCommand {
+        String message;
+        unsigned long timestamp;
+    };
+    static const int MAX_QUEUED_COMMANDS = 5;
+    QueuedCommand commandQueue[MAX_QUEUED_COMMANDS];
+    int queueHead;
+    int queueTail;
+    int queueSize;
+    
     // Frame processing constants
-    static const unsigned long FRAME_INTERVAL = 5000; // 500ms between frames
+    static const unsigned long FRAME_INTERVAL = 2000; // 2 seconds between frames (faster for user commands)
     static const unsigned long GPS_UPDATE_INTERVAL = 1000; // 1 second between GPS updates
     static const size_t MAX_FRAME_SIZE = 50000; // Maximum frame size in bytes
     
@@ -52,8 +63,13 @@ public:
     GPSData getCurrentGPSData() const;
     String getGPSString() const;
 
-    // Send a text message to Gemini
+    // Send a text message to Gemini (queues it to be sent with next frame)
     void sendTextMessage(const String& message);
+    
+    // Queue management
+    void queueUserCommand(const String& command);
+    bool hasQueuedCommands() const;
+    String getNextQueuedCommand();
     
     // Static callback for WebSocket events
     static void webSocketEvent(WStype_t type, uint8_t *payload, size_t length);
