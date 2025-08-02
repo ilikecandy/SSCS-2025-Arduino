@@ -3,13 +3,18 @@
 
 const char* TTS::DEEPGRAM_URL = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&model=aura-asteria-en&keywords=halo&keyterm=halo";
 
-TTS::TTS() : i2sInitialized(false), softwareGain(1.0), audioBuffer(nullptr), defaultLanguage("en-US") {
+TTS::TTS() : i2sInitialized(false), softwareGain(1.0), audioBuffer(nullptr), defaultLanguage("en-US"), wifiClient(nullptr), wifiClientInitialized(false) {
 }
 
 TTS::~TTS() {
     releaseSpeakerAccess();
     if (audioBuffer) {
         free(audioBuffer);
+    }
+    if (wifiClient) {
+        delete wifiClient;
+        wifiClient = nullptr;
+        wifiClientInitialized = false;
     }
 }
 
@@ -31,6 +36,18 @@ bool TTS::initialize(const String& apiKey) {
     
     // Optimize WiFi for maximum speed
     optimizeWiFiForSpeed();
+    
+    // Initialize shared WiFi client early (if WiFi is connected)
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("🔧 Pre-initializing shared WiFiClientSecure...");
+        if (initializeWiFiClient()) {
+            Serial.println("✅ Shared WiFiClientSecure ready for first TTS request");
+        } else {
+            Serial.println("⚠️ WiFiClientSecure initialization will be attempted on first use");
+        }
+    } else {
+        Serial.println("⚠️ WiFi not connected - WiFiClientSecure will be initialized when needed");
+    }
     
     Serial.println("TTS initialized successfully!");
     return true;
@@ -112,56 +129,61 @@ bool TTS::streamDeepgramAPI(const String& text, const String& language) {
         return false;
     }
 
-    String jsonPayload = "{\"text\":\"" + text + "\"}";
+    // Create local copies to avoid String scope issues
+    String localText = String(text);
+    String localLanguage = String(language);
+    String localApiKey = String(deepgramApiKey);
+
+    String jsonPayload = "{\"text\":\"" + localText + "\"}";
     Serial.println("TTS JSON Request:");
     Serial.println(jsonPayload);
 
     HTTPClient http;
-    WiFiClientSecure client;
-    client.setInsecure();  // Skip SSL verification for simplicity
+    
+    // Get shared WiFi client instead of creating new one
+    WiFiClientSecure* client = getSharedWiFiClient();
+    if (!client) {
+        Serial.println("❌ Failed to get shared WiFiClientSecure");
+        return false;
+    }
     
     // Check WiFi connection before configuring client
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("❌ WiFi not connected - cannot proceed with TTS request");
         return false;
     }
-    
-    // Optimize HTTP client for speed (with error checking)
-    if (client.connected() || WiFi.status() == WL_CONNECTED) {
-        client.setTimeout(30000);  // 30 second timeout for connection
-        // Only set TCP_NODELAY if we have a valid connection
-        // client.setNoDelay(true);   // Temporarily commented out to avoid socket errors
-    }
 
-    // Build URL with language parameter
+    // Build URL with language parameter - use local copies
     String deepgramUrl = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&keywords=halo&keyterm=halo";
     
     // Add model based on language
-    if (language == "es" || language == "spanish") {
+    if (localLanguage == "es" || localLanguage == "spanish") {
         deepgramUrl += "&model=aura-asteria-es";
-    } else if (language == "fr" || language == "french") {
+    } else if (localLanguage == "fr" || localLanguage == "french") {
         deepgramUrl += "&model=aura-asteria-fr";
-    } else if (language == "de" || language == "german") {
+    } else if (localLanguage == "de" || localLanguage == "german") {
         deepgramUrl += "&model=aura-asteria-de";
-    } else if (language == "pt" || language == "portuguese") {
+    } else if (localLanguage == "pt" || localLanguage == "portuguese") {
         deepgramUrl += "&model=aura-asteria-pt";
-    } else if (language == "it" || language == "italian") {
+    } else if (localLanguage == "it" || localLanguage == "italian") {
         deepgramUrl += "&model=aura-asteria-it";
     } else {
         // Default to English
         deepgramUrl += "&model=aura-asteria-en";
     }
 
-    http.begin(client, deepgramUrl);
+    http.begin(*client, deepgramUrl);  // Use shared client
     http.addHeader("Content-Type", "application/json");
-    String authHeader = "Token " + deepgramApiKey;
+    String authHeader = "Token " + localApiKey;
     http.addHeader("Authorization", authHeader);
     http.addHeader("Accept-Encoding", "identity");  // Disable compression to reduce CPU load
-    http.setTimeout(180000);  // 3 minute timeout
+    http.setTimeout(60000);  // 1 minute timeout (max for uint16_t)
     http.setReuse(false);  // Don't reuse connections to avoid potential issues
 
     int httpCode = http.POST(jsonPayload);
     Serial.printf("Deepgram TTS HTTP Response Code: %d\n", httpCode);
+
+    bool success = false;
 
     if (httpCode == HTTP_CODE_OK) {
         WiFiClient* stream = http.getStreamPtr();
@@ -222,8 +244,6 @@ bool TTS::streamDeepgramAPI(const String& text, const String& language) {
         Serial.printf("✅ Finished streaming. Received: %u bytes, Sent to I2S: %u bytes\n", 
                      totalBytesReceived, bytesWrittenToI2S);
         
-        http.end();
-        
         if (totalBytesReceived > 0) {
             // Add silence padding to prevent static at the end
             size_t silenceDuration = SAMPLE_RATE * 2 * 0.1;  // 100ms of silence (16-bit samples)
@@ -250,7 +270,7 @@ bool TTS::streamDeepgramAPI(const String& text, const String& language) {
             delay(50);  // Small delay to ensure clean stop
         }
         
-        return totalBytesReceived > 0;
+        success = (totalBytesReceived > 0);
     } else {
         Serial.printf("❌ Deepgram TTS request failed. HTTP Code: %d\n", httpCode);
         String errorPayload = http.getString();
@@ -258,9 +278,11 @@ bool TTS::streamDeepgramAPI(const String& text, const String& language) {
             Serial.println("Error payload:");
             Serial.println(errorPayload);
         }
-        http.end();
-        return false;
     }
+    
+    http.end();
+    // Don't delete client - it's shared and managed by the TTS instance
+    return success;
 }
 
 bool TTS::ensureInitialized() {
@@ -331,11 +353,31 @@ bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** 
         return false;
     }
 
-    String jsonPayload = "{\"text\":\"" + text + "\"}";
+    // Check available memory before proceeding
+    size_t freeHeap = ESP.getFreeHeap();
+    size_t freePsram = psramFound() ? ESP.getFreePsram() : 0;
+    Serial.printf("🔧 Memory check: Free heap=%u, Free PSRAM=%u\n", freeHeap, freePsram);
+    
+    if (freeHeap < 50000) { // Need at least 50KB free heap for SSL
+        Serial.printf("❌ Insufficient heap memory for TTS: %u bytes (need 50KB+)\n", freeHeap);
+        return false;
+    }
+
+    // Create local copies to avoid String scope issues
+    String localText = String(text);
+    String localLanguage = String(language);
+    String localApiKey = String(deepgramApiKey);
+    
+    String jsonPayload = "{\"text\":\"" + localText + "\"}";
     
     HTTPClient http;
-    WiFiClientSecure client;
-    client.setInsecure();  // Skip SSL verification for simplicity
+    
+    // Get shared WiFi client instead of creating new one
+    WiFiClientSecure* client = getSharedWiFiClient();
+    if (!client) {
+        Serial.println("❌ Failed to get shared WiFiClientSecure");
+        return false;
+    }
     
     // Check WiFi connection before configuring client
     if (WiFi.status() != WL_CONNECTED) {
@@ -343,44 +385,47 @@ bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** 
         return false;
     }
     
-    // Optimize HTTP client for speed (with error checking)
-    if (client.connected() || WiFi.status() == WL_CONNECTED) {
-        client.setTimeout(30000);  // 30 second timeout for connection
-        // Only set TCP_NODELAY if we have a valid connection
-        // client.setNoDelay(true);   // Temporarily commented out to avoid socket errors
-    }
-    
-    // Build URL with language parameter
+    // Build URL with language parameter - use local copies
     String deepgramUrl = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&keywords=halo&keyterm=halo";
     
     // Add model based on language
-    if (language == "es" || language == "spanish") {
+    if (localLanguage == "es" || localLanguage == "spanish") {
         deepgramUrl += "&model=aura-asteria-es";
-    } else if (language == "fr" || language == "french") {
+    } else if (localLanguage == "fr" || localLanguage == "french") {
         deepgramUrl += "&model=aura-asteria-fr";
-    } else if (language == "de" || language == "german") {
+    } else if (localLanguage == "de" || localLanguage == "german") {
         deepgramUrl += "&model=aura-asteria-de";
-    } else if (language == "pt" || language == "portuguese") {
+    } else if (localLanguage == "pt" || localLanguage == "portuguese") {
         deepgramUrl += "&model=aura-asteria-pt";
-    } else if (language == "it" || language == "italian") {
+    } else if (localLanguage == "it" || localLanguage == "italian") {
         deepgramUrl += "&model=aura-asteria-it";
     } else {
         // Default to English
         deepgramUrl += "&model=aura-asteria-en";
     }
 
-    http.begin(client, deepgramUrl);
+    Serial.printf("🔧 Memory before HTTP begin: %u bytes\n", ESP.getFreeHeap());
+    
+    if (!http.begin(*client, deepgramUrl)) {  // Use shared client
+        Serial.println("❌ Failed to begin HTTP connection");
+        return false;
+    }
+    
+    Serial.printf("🔧 Memory after HTTP begin: %u bytes\n", ESP.getFreeHeap());
+    
     http.addHeader("Content-Type", "application/json");
-    String authHeader = "Token " + deepgramApiKey;
+    String authHeader = "Token " + localApiKey;
     http.addHeader("Authorization", authHeader);
     http.addHeader("Accept-Encoding", "identity");  // Disable compression to reduce CPU load
     http.addHeader("Connection", "close");  // Close connection after request to free resources
-    http.setTimeout(180000);  // 3 minute timeout
+    http.setTimeout(60000);  // 1 minute timeout (max for uint16_t)
     http.setReuse(false);  // Don't reuse connections to avoid potential issues
 
     int httpCode = http.POST(jsonPayload);
     Serial.printf("Deepgram TTS HTTP Response Code: %d\n", httpCode);
 
+    bool success = false;
+    
     if (httpCode == HTTP_CODE_OK) {
         WiFiClient* stream = http.getStreamPtr();
         if (!stream) {
@@ -395,7 +440,16 @@ bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** 
 
         // Allocate initial buffer (larger for better performance)
         size_t bufferSize = (contentLength > 0) ? contentLength : 16384;  // Default 16KB if unknown
-        *audioData = (uint8_t*)malloc(bufferSize);
+        
+        // Prefer PSRAM for large audio data if available
+        if (psramFound() && ESP.getFreePsram() > bufferSize) {
+            *audioData = (uint8_t*)ps_malloc(bufferSize);
+            Serial.println("🔧 Allocated audio buffer in PSRAM");
+        } else {
+            *audioData = (uint8_t*)malloc(bufferSize);
+            Serial.println("🔧 Allocated audio buffer in heap");
+        }
+        
         if (*audioData == nullptr) {
             Serial.println("❌ Failed to allocate memory for audio data");
             http.end();
@@ -418,7 +472,14 @@ bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** 
                 // Resize buffer if needed (with larger increments)
                 if (totalRead + readChunkSize > bufferSize) {
                     bufferSize += 8192;  // Increase by 8KB at a time
-                    uint8_t* newBuffer = (uint8_t*)realloc(*audioData, bufferSize);
+                    
+                    uint8_t* newBuffer = nullptr;
+                    if (psramFound()) {
+                        newBuffer = (uint8_t*)ps_realloc(*audioData, bufferSize);
+                    } else {
+                        newBuffer = (uint8_t*)realloc(*audioData, bufferSize);
+                    }
+                    
                     if (newBuffer == nullptr) {
                         Serial.println("❌ Failed to resize audio buffer");
                         free(*audioData);
@@ -501,9 +562,7 @@ bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** 
                      totalRead, totalDownloadTime, displayAvgSpeed, avgSpeedUnit.c_str());
 
         *dataSize = totalRead;
-        
-        http.end();
-        return totalRead > 0;
+        success = (totalRead > 0);
     } else {
         Serial.printf("❌ HTTP request failed with code: %d\n", httpCode);
         String response = http.getString();
@@ -511,9 +570,14 @@ bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** 
             Serial.println("Error response:");
             Serial.println(response);
         }
-        http.end();
-        return false;
     }
+    
+    http.end();
+    // Don't delete client - it's shared and managed by the TTS instance
+    
+    Serial.printf("🔧 Memory after cleanup: %u bytes\n", ESP.getFreeHeap());
+    
+    return success;
 }
 
 bool TTS::playAudioData(const uint8_t* audioData, size_t dataSize) {
@@ -775,4 +839,57 @@ void TTS::optimizeWiFiForSpeed() {
 void TTS::setDefaultLanguage(const String& language) {
     defaultLanguage = language;
     Serial.printf("TTS default language set to: %s\n", language.c_str());
+}
+
+WiFiClientSecure* TTS::getSharedWiFiClient() {
+    if (!wifiClientInitialized) {
+        if (!initializeWiFiClient()) {
+            return nullptr;
+        }
+    }
+    return wifiClient;
+}
+
+bool TTS::initializeWiFiClient() {
+    if (wifiClient != nullptr) {
+        return true; // Already initialized
+    }
+    
+    // Check available memory before proceeding
+    size_t freeHeap = ESP.getFreeHeap();
+    Serial.printf("🔧 Memory check before WiFiClient allocation: Free heap=%u\n", freeHeap);
+    
+    if (freeHeap < 50000) { // Need at least 50KB free heap for SSL
+        Serial.printf("❌ Insufficient heap memory for WiFiClientSecure: %u bytes (need 50KB+)\n", freeHeap);
+        return false;
+    }
+    
+    // Check WiFi connection before creating client
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("❌ WiFi not connected - cannot initialize secure client");
+        return false;
+    }
+    
+    // Try to allocate WiFiClientSecure with error handling
+    Serial.println("🔧 Creating shared WiFiClientSecure instance...");
+    wifiClient = new(std::nothrow) WiFiClientSecure();
+    if (!wifiClient) {
+        Serial.println("❌ Failed to allocate shared WiFiClientSecure - insufficient memory");
+        wifiClientInitialized = false;
+        return false;
+    }
+    
+    Serial.printf("✅ Shared WiFiClientSecure allocated, remaining heap: %u\n", ESP.getFreeHeap());
+    
+    // Configure the client for optimal performance and security
+    wifiClient->setInsecure();  // Skip SSL verification for simplicity
+    wifiClient->setTimeout(30000);  // 30 second timeout for connection
+    
+    // Note: setBufferSizes() is not available in all WiFiClientSecure implementations
+    // The client will use default buffer sizes which should be sufficient
+    
+    wifiClientInitialized = true;
+    Serial.println("✅ Shared WiFiClientSecure initialized successfully");
+    
+    return true;
 }

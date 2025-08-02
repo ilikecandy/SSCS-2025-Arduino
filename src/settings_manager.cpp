@@ -12,7 +12,7 @@ bool SettingsManager::fetchSettings() {
     }
     
     HTTPClient http;
-    String settingsUrl = notificationsApiUrl + "/settings";
+    String settingsUrl = notificationsApiUrl + "/settings?device_id=companion_app";
     
     Serial.printf("📡 Fetching settings from: %s\n", settingsUrl.c_str());
     

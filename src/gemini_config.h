@@ -103,14 +103,6 @@ const char* const TOOLS_JSON = R"({
             "type": "string",
             "description": "A short log message for internal history or caregiver access."
           },
-          "routeTo": {
-            "type": "string",
-            "description": "Optional system function to route this request to, such as alertCaregiver, fetchDirections, storeMemory, etc."
-          },
-          "routeParams": {
-            "type": "object",
-            "description": "Parameters to pass to the routed function."
-          }
         },
         "required": ["intent"]
       }

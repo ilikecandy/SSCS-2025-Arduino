@@ -35,6 +35,10 @@ private:
     static const size_t BUFFER_SIZE = 16384;  // Larger buffer for better streaming
     uint8_t* audioBuffer;
     
+    // Shared WiFi client instance for all HTTPS requests
+    WiFiClientSecure* wifiClient;
+    bool wifiClientInitialized;
+    
 public:
     TTS();
     ~TTS();
@@ -77,6 +81,10 @@ private:
     bool streamDeepgramAPI(const String& text, const String& language);  // Streaming method with language
     void cleanupAudioData(uint8_t* audioData);
     void applySoftwareGain(uint8_t* audioData, size_t dataSize);  // Apply software gain to audio data
+    
+    // WiFi client management
+    WiFiClientSecure* getSharedWiFiClient();
+    bool initializeWiFiClient();
     
     // Static callback for HTTP response (if needed for future use)
     static size_t writeCallback(void* contents, size_t size, size_t nmemb, void* userp);

@@ -380,5 +380,7 @@ void VisionAssistant::sendTextMessage(const String& message) {
     bool sent = ws.sendTXT(msg);
     if (!sent) {
         Serial.println("Failed to send text message to Gemini");
+    } else {
+        Serial.printf("Sent text message: %s\n", message.c_str());
     }
 }

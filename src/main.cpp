@@ -21,17 +21,26 @@ const char* WAKE_WORDS[] = {
 };
 const int WAKE_WORDS_COUNT = sizeof(WAKE_WORDS) / sizeof(WAKE_WORDS[0]);
 
-// Audio buffer
-const int AUDIO_BUFFER_SECONDS = 3;
+// Audio buffer for wake word detection (3 seconds)
+const int WAKE_WORD_BUFFER_SECONDS = 3;
 const int SAMPLE_RATE = 16000;
 const int BITS_PER_SAMPLE = 16;
 const int CHANNELS = 1;
-const int AUDIO_BUFFER_SIZE = AUDIO_BUFFER_SECONDS * SAMPLE_RATE * (BITS_PER_SAMPLE / 8) * CHANNELS;
-uint8_t* audio_buffer = nullptr;
-volatile int audio_buffer_index = 0;  // Made volatile for dual-core access
-volatile bool is_recording = false;   // Made volatile for dual-core access
-volatile bool buffer_has_wrapped = false;  // Track if buffer has wrapped around
-volatile uint32_t buffer_sequence = 0;  // Sequence number to track buffer updates
+const int WAKE_WORD_BUFFER_SIZE = WAKE_WORD_BUFFER_SECONDS * SAMPLE_RATE * (BITS_PER_SAMPLE / 8) * CHANNELS;
+
+// Audio buffer for command recording (15 seconds maximum)
+const int COMMAND_BUFFER_SECONDS = 15;
+const int COMMAND_BUFFER_SIZE = COMMAND_BUFFER_SECONDS * SAMPLE_RATE * (BITS_PER_SAMPLE / 8) * CHANNELS;
+
+uint8_t* wake_word_buffer = nullptr;
+uint8_t* command_buffer = nullptr;
+volatile int wake_word_buffer_index = 0;  // Made volatile for dual-core access
+volatile int command_buffer_index = 0;    // For command recording
+volatile bool is_recording = false;       // Made volatile for dual-core access
+volatile bool wake_word_buffer_has_wrapped = false;  // Track if wake word buffer has wrapped around
+volatile uint32_t buffer_sequence = 0;    // Sequence number to track buffer updates
+volatile float baseline_audio_level = 0.0f; // Baseline audio level for silence detection
+volatile bool baseline_calculated = false;  // Whether baseline has been calculated
 
 // Core synchronization
 TaskHandle_t AudioTaskHandle = NULL;
@@ -51,6 +60,11 @@ struct AudioCommand {
     char text[256]; // For SPEAK_TEXT command
 };
 
+// Struct for command messages (safer than String objects)
+struct CommandMessage {
+    char command[256]; // Fixed size buffer instead of String
+};
+
 // Function declarations
 void audioTask(void *pvParameters);
 void process_audio();
@@ -59,6 +73,8 @@ String cleanTextForWakeWord(const String& text);
 void sendEmergencyAlert(const String& alertType, const String& description);
 void handleSystemAction(const JsonDocument& doc);
 void initializeLanguageSettings();
+void calculateBaselineAudioLevel();
+bool isAudioSilent();
 
 // Tool call handler for system actions
 void toolHandler(const String& toolName, const String& jsonParams) {
@@ -191,14 +207,14 @@ void handleSystemAction(const JsonDocument& doc) {
     bool shouldSpeak = doc["shouldSpeak"].as<bool>();
     String message = doc["message"].as<String>();
     String logEntry = doc["logEntry"].as<String>();
-    String routeTo = doc["routeTo"].as<String>();
+    // String routeTo = doc["routeTo"].as<String>();
     String routeParams = doc["routeParams"].as<String>();
     
     Serial.printf("Intent: %s\n", intent.c_str());
     Serial.printf("Should Speak: %s\n", shouldSpeak ? "true" : "false");
     Serial.printf("Message: %s\n", message.c_str());
     Serial.printf("Log Entry: %s\n", logEntry.c_str());
-    Serial.printf("Route To: %s\n", routeTo.c_str());
+    // Serial.printf("Route To: %s\n", routeTo.c_str());
     Serial.printf("Route Params: %s\n", routeParams.c_str());
     
     // Handle speaking if required
@@ -288,10 +304,10 @@ void handleSystemAction(const JsonDocument& doc) {
     }
     
     // Handle routing if specified
-    if (!routeTo.isEmpty()) {
-        Serial.printf("Routing to: %s with params: %s\n", routeTo.c_str(), routeParams.c_str());
-        // Add routing logic here as needed
-    }
+    // if (!routeTo.isEmpty()) {
+    //     Serial.printf("Routing to: %s with params: %s\n", routeTo.c_str(), routeParams.c_str());
+    //     // Add routing logic here as needed
+    // }
 }
 
 String cleanTextForWakeWord(const String& text) {
@@ -319,6 +335,67 @@ String cleanTextForWakeWord(const String& text) {
     cleaned.trim();
     
     return cleaned;
+}
+
+void calculateBaselineAudioLevel() {
+    if (!command_buffer || command_buffer_index < 1600) { // Need at least 0.1 seconds of audio
+        return;
+    }
+    
+    // Calculate RMS of the first 0.5 seconds of recording for baseline
+    int total_samples = command_buffer_index / 2; // Total number of 16-bit samples available
+    int samples_to_analyze = min(total_samples, 8000); // 0.5 seconds max, but not more than available
+    
+    if (samples_to_analyze <= 0) {
+        return; // Safety check
+    }
+    
+    int16_t* samples = (int16_t*)command_buffer;
+    
+    float sum_squares = 0.0f;
+    for (int i = 0; i < samples_to_analyze; i++) {
+        float sample = (float)samples[i];
+        sum_squares += sample * sample;
+    }
+    
+    baseline_audio_level = sqrt(sum_squares / samples_to_analyze);
+    baseline_calculated = true;
+    
+    Serial.printf("📊 Baseline audio level calculated: %.2f (from %d samples)\n", baseline_audio_level, samples_to_analyze);
+}
+
+bool isAudioSilent() {
+    if (!baseline_calculated || !command_buffer || command_buffer_index < 16000) { // Need at least 1 second of audio (16000 bytes)
+        return false;
+    }
+    
+    // Check the last 1 second of audio for silence - ensure we don't go out of bounds
+    int total_samples = command_buffer_index / 2; // Total number of 16-bit samples
+    int samples_to_check = min(16000, total_samples); // 1 second max, but not more than available
+    int start_index = max(0, total_samples - samples_to_check); // Start from a safe position
+    
+    if (start_index >= total_samples || samples_to_check <= 0) {
+        return false; // Safety check
+    }
+    
+    int16_t* samples = (int16_t*)command_buffer;
+    
+    float sum_squares = 0.0f;
+    for (int i = start_index; i < start_index + samples_to_check && i < total_samples; i++) {
+        float sample = (float)samples[i];
+        sum_squares += sample * sample;
+    }
+    
+    float current_level = sqrt(sum_squares / samples_to_check);
+    
+    // Consider it silent if current level is less than 1.2x baseline + small threshold (made more sensitive)
+    float silence_threshold = baseline_audio_level * 1.2f + 50.0f;
+    
+    Serial.printf("🔇 Silence check: current=%.2f, baseline=%.2f, threshold=%.2f, silent=%s\n", 
+                 current_level, baseline_audio_level, silence_threshold, 
+                 (current_level < silence_threshold) ? "YES" : "NO");
+    
+    return current_level < silence_threshold;
 }
 
 void initializeLanguageSettings() {
@@ -356,7 +433,7 @@ void setup() {
     
     // Create synchronization primitives
     audioMutex = xSemaphoreCreateMutex();
-    commandQueue = xQueueCreate(5, sizeof(String));
+    commandQueue = xQueueCreate(5, sizeof(CommandMessage)); // Use CommandMessage struct instead of String
     audioCommandQueue = xQueueCreate(5, sizeof(AudioCommand)); // Create audio command queue
     
     if (!audioMutex || !commandQueue || !audioCommandQueue) {
@@ -374,18 +451,21 @@ void setup() {
         Serial.println("   PSRAM: Not found");
     }
     
-    // Check if PSRAM is available
+    // Check if PSRAM is available and allocate buffers
     if (!psramFound()) {
         Serial.println("PSRAM not found! Using regular malloc instead.");
-        audio_buffer = (uint8_t*)malloc(AUDIO_BUFFER_SIZE);
+        wake_word_buffer = (uint8_t*)malloc(WAKE_WORD_BUFFER_SIZE);
+        command_buffer = (uint8_t*)malloc(COMMAND_BUFFER_SIZE);
     } else {
         Serial.println("PSRAM found, using ps_malloc.");
-        audio_buffer = (uint8_t*)ps_malloc(AUDIO_BUFFER_SIZE);
+        wake_word_buffer = (uint8_t*)ps_malloc(WAKE_WORD_BUFFER_SIZE);
+        command_buffer = (uint8_t*)ps_malloc(COMMAND_BUFFER_SIZE);
     }
     
-    if (!audio_buffer) {
-        Serial.println("CRITICAL: Failed to allocate audio buffer!");
-        Serial.printf("Tried to allocate %d bytes\n", AUDIO_BUFFER_SIZE);
+    if (!wake_word_buffer || !command_buffer) {
+        Serial.println("CRITICAL: Failed to allocate audio buffers!");
+        Serial.printf("Tried to allocate wake word buffer: %d bytes\n", WAKE_WORD_BUFFER_SIZE);
+        Serial.printf("Tried to allocate command buffer: %d bytes\n", COMMAND_BUFFER_SIZE);
         Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
         if (psramFound()) {
             Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
@@ -395,10 +475,13 @@ void setup() {
         }
     }
     
-    // Initialize buffer to zero
-    memset(audio_buffer, 0, AUDIO_BUFFER_SIZE);
-    Serial.printf("✅ Successfully allocated %d bytes for audio buffer\n", AUDIO_BUFFER_SIZE);
-    Serial.printf("Audio buffer address: %p\n", audio_buffer);
+    // Initialize buffers to zero
+    memset(wake_word_buffer, 0, WAKE_WORD_BUFFER_SIZE);
+    memset(command_buffer, 0, COMMAND_BUFFER_SIZE);
+    Serial.printf("✅ Successfully allocated wake word buffer: %d bytes\n", WAKE_WORD_BUFFER_SIZE);
+    Serial.printf("✅ Successfully allocated command buffer: %d bytes\n", COMMAND_BUFFER_SIZE);
+    Serial.printf("Wake word buffer address: %p\n", wake_word_buffer);
+    Serial.printf("Command buffer address: %p\n", command_buffer);
 
     // Initialize the vision assistant (includes GPS initialization) on Core 1
     Serial.println("Initializing Vision Assistant on Core 1...");
@@ -480,11 +563,11 @@ void setup() {
 }
 
 void process_audio() {
-    // Check if audio buffer is allocated
-    if (!audio_buffer) {
+    // Check if audio buffers are allocated
+    if (!wake_word_buffer || !command_buffer) {
         static unsigned long last_warning = 0;
         if (millis() - last_warning > 5000) {  // Warn every 5 seconds
-            Serial.println("WARNING: Audio buffer not allocated, skipping audio processing");
+            Serial.println("WARNING: Audio buffers not allocated, skipping audio processing");
             last_warning = millis();
         }
         return;
@@ -516,7 +599,7 @@ void process_audio() {
             total_bytes = 0;
         }
         
-        // Ensure we don't overflow the audio buffer
+        // Process each sample
         for (int i = 0; i < samples_read; i++) {
             // Convert 32-bit sample to 16-bit (same as working demo)
             int32_t sample = raw_buffer[i] >> 14;
@@ -534,20 +617,31 @@ void process_audio() {
             int16_t sample16 = (int16_t)sample;
             uint8_t* sample_bytes = (uint8_t*)&sample16;
             
-            // Store as little-endian 16-bit samples
-            if (audio_buffer_index + 1 < AUDIO_BUFFER_SIZE) {
-                audio_buffer[audio_buffer_index++] = sample_bytes[0];
-                audio_buffer[audio_buffer_index++] = sample_bytes[1];
+            // Store in wake word buffer (continuous circular buffer) - ensure we have space for 2 bytes
+            if (wake_word_buffer_index + 2 <= WAKE_WORD_BUFFER_SIZE) {
+                wake_word_buffer[wake_word_buffer_index] = sample_bytes[0];
+                wake_word_buffer[wake_word_buffer_index + 1] = sample_bytes[1];
+                wake_word_buffer_index += 2;
             } else {
                 // Buffer is full, wrap to beginning (circular buffer)
-                buffer_has_wrapped = true;
-                audio_buffer_index = 0;
-                audio_buffer[audio_buffer_index++] = sample_bytes[0];
-                audio_buffer[audio_buffer_index++] = sample_bytes[1];
+                wake_word_buffer_has_wrapped = true;
+                wake_word_buffer_index = 0;
+                if (wake_word_buffer_index + 2 <= WAKE_WORD_BUFFER_SIZE) {
+                    wake_word_buffer[wake_word_buffer_index] = sample_bytes[0];
+                    wake_word_buffer[wake_word_buffer_index + 1] = sample_bytes[1];
+                    wake_word_buffer_index += 2;
+                }
+            }
+            
+            // Store in command buffer if recording - ensure we have space for 2 bytes
+            if (is_recording && command_buffer_index + 2 <= COMMAND_BUFFER_SIZE) {
+                command_buffer[command_buffer_index] = sample_bytes[0];
+                command_buffer[command_buffer_index + 1] = sample_bytes[1];
+                command_buffer_index += 2;
             }
             
             // Increment sequence every 1000 samples to track buffer updates
-            if ((audio_buffer_index % 2000) == 0) {
+            if ((wake_word_buffer_index % 2000) == 0) {
                 buffer_sequence++;
             }
         }
@@ -598,42 +692,49 @@ void audioTask(void *pvParameters) {
         }
 
         // Process audio data
-        if (audio_buffer && xSemaphoreTake(audioMutex, portMAX_DELAY)) {
+        if ((wake_word_buffer || command_buffer) && xSemaphoreTake(audioMutex, portMAX_DELAY)) {
             process_audio();
             xSemaphoreGive(audioMutex);
         }
 
-        // Speech-to-text processing every 3 seconds for wake word detection
+        // Speech-to-text processing every 1 second for wake word detection (only when not recording)
         // Note: Wake word detection uses Deepgram's search API for acoustic pattern matching
         // Command transcription after wake word still uses regular transcription API
-        if (millis() - last_stt_time > 3000) {
+        if (!is_recording && millis() - last_stt_time > 1000) {
             last_stt_time = millis();
 
-            // Check if audio buffer is allocated and has sufficient data (use buffer wrap or minimum threshold)
-            if (!audio_buffer || (!buffer_has_wrapped && audio_buffer_index < 8000)) {
+            // Check if wake word buffer is allocated and has sufficient data
+            if (!wake_word_buffer || (!wake_word_buffer_has_wrapped && wake_word_buffer_index < 8000)) {
                 // Add debug info about buffer state
                 static unsigned long last_debug = 0;
                 if (millis() - last_debug > 10000) {  // Debug every 10 seconds
-                    Serial.printf("Audio buffer state: allocated=%s, index=%d, required=8000\n", 
-                                audio_buffer ? "yes" : "no", audio_buffer_index);
+                    Serial.printf("Wake word buffer state: allocated=%s, index=%d, required=8000, wrapped=%s\n", 
+                                wake_word_buffer ? "yes" : "no", wake_word_buffer_index, 
+                                wake_word_buffer_has_wrapped ? "yes" : "no");
                     
                     // Show some sample values to see if we're getting real audio data
-                    if (audio_buffer && audio_buffer_index > 100) {
-                        int16_t* samples = (int16_t*)audio_buffer;
+                    if (wake_word_buffer && wake_word_buffer_index > 100) {
+                        int16_t* samples = (int16_t*)wake_word_buffer;
                         Serial.printf("Sample audio values: %d, %d, %d, %d, %d\n", 
                                     samples[0], samples[1], samples[10], samples[50], samples[100]);
                     }
                     
-                    // Check if buffer is wrapping too frequently
-                    Serial.printf("Buffer wrap status: wrapped=%s, sequence=%u\n", 
-                                buffer_has_wrapped ? "yes" : "no", buffer_sequence);
+                    // Check buffer bounds
+                    if (wake_word_buffer_index > WAKE_WORD_BUFFER_SIZE) {
+                        Serial.printf("❌ CRITICAL: Wake word buffer index out of bounds: %d > %d\n", 
+                                    wake_word_buffer_index, WAKE_WORD_BUFFER_SIZE);
+                        wake_word_buffer_index = 0; // Reset to prevent corruption
+                        wake_word_buffer_has_wrapped = false;
+                    }
+                    
+                    Serial.printf("Buffer sequence: %u\n", buffer_sequence);
                     last_debug = millis();
                 }
                 continue;
             }
 
             // Create a temporary buffer with the last 3 seconds of audio
-            uint8_t* temp_buffer = (uint8_t*)malloc(AUDIO_BUFFER_SIZE);
+            uint8_t* temp_buffer = (uint8_t*)malloc(WAKE_WORD_BUFFER_SIZE);
             if (!temp_buffer) {
                 Serial.println("Failed to allocate temp buffer for transcription");
                 continue;
@@ -645,8 +746,8 @@ void audioTask(void *pvParameters) {
             static uint32_t last_transcribed_sequence = 0;
             
             if (xSemaphoreTake(audioMutex, portMAX_DELAY)) {
-                current_index = audio_buffer_index;
-                has_wrapped = buffer_has_wrapped;
+                current_index = wake_word_buffer_index;
+                has_wrapped = wake_word_buffer_has_wrapped;
                 current_sequence = buffer_sequence;
                 
                 // Only transcribe if we have new audio data
@@ -659,13 +760,13 @@ void audioTask(void *pvParameters) {
                 // Copy the most recent audio data in proper circular buffer order
                 if (has_wrapped) {
                     // Buffer has wrapped - copy from current position to end, then from start to current
-                    int bytes_from_current_to_end = AUDIO_BUFFER_SIZE - current_index;
-                    memcpy(temp_buffer, audio_buffer + current_index, bytes_from_current_to_end);
-                    memcpy(temp_buffer + bytes_from_current_to_end, audio_buffer, current_index);
+                    int bytes_from_current_to_end = WAKE_WORD_BUFFER_SIZE - current_index;
+                    memcpy(temp_buffer, wake_word_buffer + current_index, bytes_from_current_to_end);
+                    memcpy(temp_buffer + bytes_from_current_to_end, wake_word_buffer, current_index);
                 } else {
                     // Buffer hasn't wrapped yet, copy what we have and pad with zeros
-                    memcpy(temp_buffer, audio_buffer, current_index);
-                    memset(temp_buffer + current_index, 0, AUDIO_BUFFER_SIZE - current_index);
+                    memcpy(temp_buffer, wake_word_buffer, current_index);
+                    memset(temp_buffer + current_index, 0, WAKE_WORD_BUFFER_SIZE - current_index);
                 }
                 
                 // Update the last transcribed sequence
@@ -676,7 +777,7 @@ void audioTask(void *pvParameters) {
                 if (millis() - lastBufferDebug > 5000) {
                     Serial.printf("Buffer debug: index=%d, wrapped=%s, seq=%u, samples=[%d,%d,%d]\n", 
                                 current_index, has_wrapped ? "yes" : "no", current_sequence,
-                                ((int16_t*)audio_buffer)[0], ((int16_t*)audio_buffer)[1], ((int16_t*)audio_buffer)[2]);
+                                ((int16_t*)wake_word_buffer)[0], ((int16_t*)wake_word_buffer)[1], ((int16_t*)wake_word_buffer)[2]);
                     lastBufferDebug = millis();
                 }
                 
@@ -686,7 +787,7 @@ void audioTask(void *pvParameters) {
             // Only transcribe if we have enough real audio data (not just zeros)
             bool hasRealAudio = false;
             int16_t* samples = (int16_t*)temp_buffer;
-            int sampleCount = AUDIO_BUFFER_SIZE / 2;
+            int sampleCount = WAKE_WORD_BUFFER_SIZE / 2;
             for (int i = 0; i < sampleCount; i++) {
                 if (abs(samples[i]) > 200) { // Threshold for real audio
                     hasRealAudio = true;
@@ -698,7 +799,7 @@ void audioTask(void *pvParameters) {
             if (hasRealAudio) {
                 // Use Deepgram's search API for wake word detection instead of transcription
                 Serial.println("🔍 Searching for wake words using Deepgram search API...");
-                wakeWordDetected = deepgramClient.searchForWakeWords(temp_buffer, AUDIO_BUFFER_SIZE, WAKE_WORDS, WAKE_WORDS_COUNT, 0.3f);
+                wakeWordDetected = deepgramClient.searchForWakeWords(temp_buffer, WAKE_WORD_BUFFER_SIZE, WAKE_WORDS, WAKE_WORDS_COUNT, 0.5f);
                 
                 if (wakeWordDetected) {
                     Serial.println("✅ Wake word detected via search API!");
@@ -724,13 +825,14 @@ void audioTask(void *pvParameters) {
                 
                 is_recording = true;
                 recording_start_time = millis();
-                Serial.println("Recording...");
+                Serial.println("Recording command (max 15 seconds)...");
                 
                 if (xSemaphoreTake(audioMutex, portMAX_DELAY)) {
-                    audio_buffer_index = 0; // Clear buffer to start recording new audio
-                    buffer_has_wrapped = false; // Reset wrap flag
-                    buffer_sequence++; // Increment sequence for new recording
-                    memset(audio_buffer, 0, AUDIO_BUFFER_SIZE); // Clear the buffer like in working demo
+                    command_buffer_index = 0; // Clear command buffer to start recording new audio
+                    baseline_calculated = false; // Reset baseline
+                    if (command_buffer) {
+                        memset(command_buffer, 0, COMMAND_BUFFER_SIZE); // Clear the command buffer
+                    }
                     xSemaphoreGive(audioMutex);
                 }
             }
@@ -742,35 +844,104 @@ void audioTask(void *pvParameters) {
                 recording_start_time = millis();
             }
 
-            if (millis() - recording_start_time > 5000) { // Record for 5 seconds
-                is_recording = false;
-                recording_start_time = 0;
-                Serial.println("Recording finished. Processing command...");
-                
-                // Only process if we have sufficient audio data
-                if (audio_buffer && audio_buffer_index >= 16000) {
-                    uint8_t* command_buffer = (uint8_t*)malloc(audio_buffer_index);
-                    if (command_buffer && xSemaphoreTake(audioMutex, portMAX_DELAY)) {
-                        memcpy(command_buffer, audio_buffer, audio_buffer_index);
-                        int buffer_size = audio_buffer_index;
-                        xSemaphoreGive(audioMutex);
-                        
-                        String command = deepgramClient.transcribe(command_buffer, buffer_size);
-                        Serial.println("Command: " + command);
+            // Calculate baseline after first 0.5 seconds of recording
+            if (!baseline_calculated && millis() - recording_start_time > 500) {
+                if (xSemaphoreTake(audioMutex, portMAX_DELAY)) {
+                    calculateBaselineAudioLevel();
+                    xSemaphoreGive(audioMutex);
+                }
+            }
 
-                        if (!command.isEmpty()) {
-                            // Send command to main core via queue
-                            if (xQueueSend(commandQueue, &command, 0) != pdTRUE) {
-                                Serial.println("Failed to queue command");
-                            }
+            // Check for silence after baseline is calculated and at least 3 seconds have passed
+            bool shouldStopForSilence = false;
+            if (baseline_calculated && millis() - recording_start_time > 3000) { // Wait 3 seconds before checking silence
+                static unsigned long lastSilenceCheck = 0;
+                static int consecutiveSilentChecks = 0; // Track consecutive silent readings
+                const int requiredSilentChecks = 5; // Need 5 consecutive checks (1 second total)
+                
+                if (millis() - lastSilenceCheck > 200) { // Check every 200ms
+                    if (xSemaphoreTake(audioMutex, portMAX_DELAY)) {
+                        // Safety check: ensure command buffer index is within bounds
+                        if (command_buffer_index > COMMAND_BUFFER_SIZE) {
+                            Serial.printf("❌ CRITICAL: Command buffer overflow detected: %d > %d\n", 
+                                        command_buffer_index, COMMAND_BUFFER_SIZE);
+                            command_buffer_index = COMMAND_BUFFER_SIZE; // Cap it to prevent corruption
                         }
                         
-                        free(command_buffer);
+                        bool currentlySilent = isAudioSilent();
+                        if (currentlySilent) {
+                            consecutiveSilentChecks++;
+                            Serial.printf("🔇 Silent check %d/%d\n", consecutiveSilentChecks, requiredSilentChecks);
+                        } else {
+                            consecutiveSilentChecks = 0; // Reset counter if not silent
+                        }
+                        
+                        // Only stop if we've had enough consecutive silent checks
+                        shouldStopForSilence = (consecutiveSilentChecks >= requiredSilentChecks);
+                        
+                        xSemaphoreGive(audioMutex);
+                    }
+                    lastSilenceCheck = millis();
+                    if (shouldStopForSilence) {
+                        Serial.println("🔇 Sustained silence detected - stopping recording");
+                    }
+                }
+            }
+
+            // Stop recording if max time reached or silence detected
+            if (millis() - recording_start_time > 15000 || shouldStopForSilence) { // 15 seconds max or silence
+                is_recording = false;
+                recording_start_time = 0;
+                
+                if (shouldStopForSilence) {
+                    Serial.println("Recording finished due to silence. Processing command...");
+                } else {
+                    Serial.println("Recording finished (15s max). Processing command...");
+                }
+                
+                // DO NOT play ding sound here - only ding before recording starts, not after it ends
+                // The ding after wake word detection indicates "ready for command"
+                // No need for another ding when command recording ends
+                
+                // Only process if we have sufficient audio data
+                if (command_buffer && command_buffer_index >= 16000 && command_buffer_index <= COMMAND_BUFFER_SIZE) { // At least 1 second, but not exceeding buffer
+                    uint8_t* temp_command_buffer = (uint8_t*)malloc(command_buffer_index);
+                    if (temp_command_buffer && xSemaphoreTake(audioMutex, portMAX_DELAY)) {
+                        // Double-check buffer bounds before copying
+                        if (command_buffer_index <= COMMAND_BUFFER_SIZE) {
+                            memcpy(temp_command_buffer, command_buffer, command_buffer_index);
+                            int buffer_size = command_buffer_index;
+                            xSemaphoreGive(audioMutex);
+                            
+                            Serial.printf("🎤 Processing %d bytes of command audio\n", buffer_size);
+                            String command = deepgramClient.transcribe(temp_command_buffer, buffer_size);
+                            Serial.println("Command: " + command);
+
+                            if (!command.isEmpty()) {
+                                // Send command to main core via queue using safe struct
+                                CommandMessage cmdMsg;
+                                strncpy(cmdMsg.command, command.c_str(), sizeof(cmdMsg.command) - 1);
+                                cmdMsg.command[sizeof(cmdMsg.command) - 1] = '\0'; // Ensure null termination
+                                
+                                if (xQueueSend(commandQueue, &cmdMsg, 0) != pdTRUE) {
+                                    Serial.println("Failed to queue command");
+                                }
+                            }
+                        } else {
+                            Serial.printf("❌ Command buffer index out of bounds: %d > %d\n", command_buffer_index, COMMAND_BUFFER_SIZE);
+                            xSemaphoreGive(audioMutex);
+                        }
+                        
+                        free(temp_command_buffer);
                     } else {
-                        Serial.println("Failed to allocate command buffer or get mutex");
+                        Serial.println("Failed to allocate temp command buffer or get mutex");
+                        if (temp_command_buffer) {
+                            free(temp_command_buffer);
+                        }
                     }
                 } else {
-                    Serial.println("Not enough audio data recorded, skipping transcription");
+                    Serial.printf("Not enough audio data recorded or buffer corrupted: %d bytes (need >= 16000, <= %d)\n", 
+                                command_buffer_index, COMMAND_BUFFER_SIZE);
                 }
             }
         }
@@ -797,10 +968,10 @@ void loop() {
     visionAssistant.run();
     
     // Check for commands from the audio task
-    String command;
-    if (xQueueReceive(commandQueue, &command, 0) == pdTRUE) {
-        Serial.printf("Received command from audio core: %s\n", command.c_str());
-        visionAssistant.sendTextMessage(command);
+    CommandMessage cmdMsg;
+    if (xQueueReceive(commandQueue, &cmdMsg, 0) == pdTRUE) {
+        Serial.printf("Received command from audio core: %s\n", cmdMsg.command);
+        visionAssistant.sendTextMessage(String(cmdMsg.command)); // Convert to String only when needed locally
     }
 
     // Print GPS status every 30 seconds
