@@ -9,7 +9,7 @@ uint8_t* DeepgramClient::createWAVData(const uint8_t* pcm_data, size_t pcm_size,
     *wav_size = wav_data_size;
     
     // Allocate memory for WAV data
-    uint8_t* wav_data = (uint8_t*)malloc(wav_data_size);
+    uint8_t* wav_data = (uint8_t*)ps_malloc(wav_data_size);
     if (!wav_data) {
         Serial.println("Failed to allocate memory for WAV data");
         return nullptr;
@@ -58,10 +58,10 @@ String DeepgramClient::extractTranscript(const String& response) {
     }
     
     // Use a larger document size to handle the deeply nested Deepgram response
-    JsonDocument doc;
+    stt_doc.clear();
     
     // Increase capacity for the complex Deepgram response structure
-    DeserializationError error = deserializeJson(doc, response);
+    DeserializationError error = deserializeJson(stt_doc, response);
     
     if (error) {
         Serial.printf("  %s\n", error.c_str());
@@ -83,9 +83,9 @@ String DeepgramClient::extractTranscript(const String& response) {
     }
     
     // Extract transcript from Deepgram response format
-    if (doc.containsKey("results") && doc["results"].containsKey("channels") && 
-        doc["results"]["channels"].size() > 0) {
-        JsonArray alternatives = doc["results"]["channels"][0]["alternatives"];
+    if (stt_doc.containsKey("results") && stt_doc["results"].containsKey("channels") &&
+        stt_doc["results"]["channels"].size() > 0) {
+        JsonArray alternatives = stt_doc["results"]["channels"][0]["alternatives"];
         if (alternatives.size() > 0) {
             String transcript = alternatives[0]["transcript"].as<String>();
             return transcript;
@@ -102,8 +102,8 @@ bool DeepgramClient::extractSearchResults(const String& response, const String& 
         return false;
     }
     
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, response);
+    stt_doc.clear();
+    DeserializationError error = deserializeJson(stt_doc, response);
     
     if (error) {
         Serial.printf("JSON parsing error for search results: %s\n", error.c_str());
@@ -111,10 +111,10 @@ bool DeepgramClient::extractSearchResults(const String& response, const String& 
     }
     
     // Extract search results from Deepgram response format
-    if (doc.containsKey("results") && doc["results"].containsKey("channels") && 
-        doc["results"]["channels"].size() > 0) {
+    if (stt_doc.containsKey("results") && stt_doc["results"].containsKey("channels") &&
+        stt_doc["results"]["channels"].size() > 0) {
         
-        JsonArray searches = doc["results"]["channels"][0]["search"];
+        JsonArray searches = stt_doc["results"]["channels"][0]["search"];
         
         for (JsonObject search : searches) {
             String query = search["query"].as<String>();
@@ -186,7 +186,10 @@ String DeepgramClient::transcribe(const uint8_t* audio_data, size_t data_size, c
         deepgramUrl += "&language=" + language;
     }
     
-    if (http.begin(deepgramUrl)) {
+    HTTPClient http;
+    WiFiClientSecure client;
+    client.setInsecure();
+    if (http.begin(client, deepgramUrl)) {
         http.addHeader("Authorization", "Token " + String(DEEPGRAM_API_KEY));
         http.addHeader("Content-Type", "audio/wav");
         
@@ -197,11 +200,14 @@ String DeepgramClient::transcribe(const uint8_t* audio_data, size_t data_size, c
 
         if (httpCode > 0) {
             if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_CREATED) {
-                String raw_response = http.getString();
+                int len = http.getSize();
+                WiFiClient* stream = http.getStreamPtr();
+                int read = stream->readBytes(response_buffer, min(len, (int)sizeof(response_buffer) - 1));
+                response_buffer[read] = '\0';
                 Serial.println("✅ Deepgram transcription successful");
                 
                 // Extract transcript from JSON response
-                String transcript = extractTranscript(raw_response);
+                String transcript = extractTranscript(response_buffer);
                 if (!transcript.isEmpty()) {
                     response = transcript;
                 } else {
@@ -273,7 +279,10 @@ bool DeepgramClient::searchForWakeWords(const uint8_t* audio_data, size_t data_s
     
     bool wakeWordFound = false;
     
-    if (http.begin(deepgramUrl)) {
+    HTTPClient http;
+    WiFiClientSecure client;
+    client.setInsecure();
+    if (http.begin(client, deepgramUrl)) {
         http.addHeader("Authorization", "Token " + String(DEEPGRAM_API_KEY));
         http.addHeader("Content-Type", "audio/wav");
         
@@ -284,12 +293,15 @@ bool DeepgramClient::searchForWakeWords(const uint8_t* audio_data, size_t data_s
 
         if (httpCode > 0) {
             if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_CREATED) {
-                String raw_response = http.getString();
+                int len = http.getSize();
+                WiFiClient* stream = http.getStreamPtr();
+                int read = stream->readBytes(response_buffer, min(len, (int)sizeof(response_buffer) - 1));
+                response_buffer[read] = '\0';
                 Serial.println("✅ Deepgram search request successful");
                 
                 // Check each wake word for matches
                 for (int i = 0; i < wakeWordCount && !wakeWordFound; i++) {
-                    if (extractSearchResults(raw_response, String(wakeWords[i]), minConfidence)) {
+                    if (extractSearchResults(response_buffer, String(wakeWords[i]), minConfidence)) {
                         wakeWordFound = true;
                         break;
                     }

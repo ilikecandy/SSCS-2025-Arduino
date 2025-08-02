@@ -3,18 +3,13 @@
 
 const char* TTS::DEEPGRAM_URL = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&model=aura-asteria-en&keywords=halo&keyterm=halo";
 
-TTS::TTS() : i2sInitialized(false), softwareGain(1.0), audioBuffer(nullptr), defaultLanguage("en-US"), wifiClient(nullptr), wifiClientInitialized(false) {
+TTS::TTS() : i2sInitialized(false), softwareGain(1.0), audioBuffer(nullptr), defaultLanguage("en-US"), is_cancellation_requested(false) {
 }
 
 TTS::~TTS() {
     releaseSpeakerAccess();
     if (audioBuffer) {
         free(audioBuffer);
-    }
-    if (wifiClient) {
-        delete wifiClient;
-        wifiClient = nullptr;
-        wifiClientInitialized = false;
     }
 }
 
@@ -37,17 +32,6 @@ bool TTS::initialize(const String& apiKey) {
     // Optimize WiFi for maximum speed
     optimizeWiFiForSpeed();
     
-    // Initialize shared WiFi client early (if WiFi is connected)
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("🔧 Pre-initializing shared WiFiClientSecure...");
-        if (initializeWiFiClient()) {
-            Serial.println("✅ Shared WiFiClientSecure ready for first TTS request");
-        } else {
-            Serial.println("⚠️ WiFiClientSecure initialization will be attempted on first use");
-        }
-    } else {
-        Serial.println("⚠️ WiFi not connected - WiFiClientSecure will be initialized when needed");
-    }
     
     Serial.println("TTS initialized successfully!");
     return true;
@@ -62,6 +46,9 @@ bool TTS::speakText(const String& text, const String& language) {
         Serial.println("TTS: Empty text provided");
         return false;
     }
+    
+    // Reset cancellation flag at the start of a new speech request
+    is_cancellation_requested = false;
     
     // Check WiFi connection first
     if (WiFi.status() != WL_CONNECTED) {
@@ -100,7 +87,9 @@ bool TTS::speakText(const String& text, const String& language) {
     bool playResult = playAudioData(audioData, dataSize);
     unsigned long totalTime = millis() - startTime;
     
-    if (playResult) {
+    if (is_cancellation_requested) {
+        Serial.println("🚫 TTS playback cancelled");
+    } else if (playResult) {
         Serial.printf("✅ TTS complete! Total time: %lu ms\n", totalTime);
     } else {
         Serial.println("❌ TTS playback failed");
@@ -112,7 +101,7 @@ bool TTS::speakText(const String& text, const String& language) {
     // Always release I2S access after speaking
     releaseSpeakerAccess();
     
-    return playResult;
+    return playResult && !is_cancellation_requested;
 }
 
 bool TTS::streamDeepgramAPI(const String& text, const String& language) {
@@ -140,12 +129,8 @@ bool TTS::streamDeepgramAPI(const String& text, const String& language) {
 
     HTTPClient http;
     
-    // Get shared WiFi client instead of creating new one
-    WiFiClientSecure* client = getSharedWiFiClient();
-    if (!client) {
-        Serial.println("❌ Failed to get shared WiFiClientSecure");
-        return false;
-    }
+    WiFiClientSecure client;
+    client.setInsecure();
     
     // Check WiFi connection before configuring client
     if (WiFi.status() != WL_CONNECTED) {
@@ -172,7 +157,7 @@ bool TTS::streamDeepgramAPI(const String& text, const String& language) {
         deepgramUrl += "&model=aura-asteria-en";
     }
 
-    http.begin(*client, deepgramUrl);  // Use shared client
+    http.begin(client, deepgramUrl);
     http.addHeader("Content-Type", "application/json");
     String authHeader = "Token " + localApiKey;
     http.addHeader("Authorization", authHeader);
@@ -205,6 +190,10 @@ bool TTS::streamDeepgramAPI(const String& text, const String& language) {
 
         // Stream and play audio in real-time
         while (http.connected() && (stream->available() || (millis() - lastDataTime < streamReadTimeout))) {
+            if (is_cancellation_requested) {
+                Serial.println("🚫 TTS streaming cancelled by request");
+                break;
+            }
             if (!http.connected()) {
                 Serial.println("❌ HTTP connection lost during stream");
                 break;
@@ -247,7 +236,7 @@ bool TTS::streamDeepgramAPI(const String& text, const String& language) {
         if (totalBytesReceived > 0) {
             // Add silence padding to prevent static at the end
             size_t silenceDuration = SAMPLE_RATE * 2 * 0.1;  // 100ms of silence (16-bit samples)
-            uint8_t* silenceBuffer = (uint8_t*)calloc(silenceDuration, 1);  // Zero-filled buffer
+            uint8_t* silenceBuffer = (uint8_t*)ps_calloc(silenceDuration, 1);  // Zero-filled buffer
             if (silenceBuffer != nullptr) {
                 size_t silenceWritten;
                 esp_err_t err = i2s_write(I2S_PORT, silenceBuffer, silenceDuration, &silenceWritten, 1000);
@@ -281,7 +270,6 @@ bool TTS::streamDeepgramAPI(const String& text, const String& language) {
     }
     
     http.end();
-    // Don't delete client - it's shared and managed by the TTS instance
     return success;
 }
 
@@ -372,12 +360,8 @@ bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** 
     
     HTTPClient http;
     
-    // Get shared WiFi client instead of creating new one
-    WiFiClientSecure* client = getSharedWiFiClient();
-    if (!client) {
-        Serial.println("❌ Failed to get shared WiFiClientSecure");
-        return false;
-    }
+    WiFiClientSecure client;
+    client.setInsecure();
     
     // Check WiFi connection before configuring client
     if (WiFi.status() != WL_CONNECTED) {
@@ -406,7 +390,7 @@ bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** 
 
     Serial.printf("🔧 Memory before HTTP begin: %u bytes\n", ESP.getFreeHeap());
     
-    if (!http.begin(*client, deepgramUrl)) {  // Use shared client
+    if (!http.begin(client, deepgramUrl)) {
         Serial.println("❌ Failed to begin HTTP connection");
         return false;
     }
@@ -442,7 +426,7 @@ bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** 
         size_t bufferSize = (contentLength > 0) ? contentLength : 16384;  // Default 16KB if unknown
         
         // Prefer PSRAM for large audio data if available
-        if (psramFound() && ESP.getFreePsram() > bufferSize) {
+        if (psramFound()) {
             *audioData = (uint8_t*)ps_malloc(bufferSize);
             Serial.println("🔧 Allocated audio buffer in PSRAM");
         } else {
@@ -573,7 +557,6 @@ bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** 
     }
     
     http.end();
-    // Don't delete client - it's shared and managed by the TTS instance
     
     Serial.printf("🔧 Memory after cleanup: %u bytes\n", ESP.getFreeHeap());
     
@@ -616,7 +599,7 @@ bool TTS::playAudioData(const uint8_t* audioData, size_t dataSize) {
     
     if (softwareGain != 1.0) {
         // Create a copy for gain processing
-        processedAudioData = (uint8_t*)malloc(dataSize);
+        processedAudioData = (uint8_t*)ps_malloc(dataSize);
         if (processedAudioData != nullptr) {
             memcpy(processedAudioData, audioData, dataSize);
             applySoftwareGain(processedAudioData, dataSize);
@@ -643,6 +626,10 @@ bool TTS::playAudioData(const uint8_t* audioData, size_t dataSize) {
     
     // Write raw PCM data directly to I2S in chunks
     while (totalWritten < dataSize) {
+        if (is_cancellation_requested) {
+            Serial.println("🚫 Audio playback cancelled by request");
+            break;
+        }
         size_t chunkSize = (BUFFER_SIZE < (dataSize - totalWritten)) ? BUFFER_SIZE : (dataSize - totalWritten);
         
         esp_err_t err = i2s_write(I2S_PORT, playbackData + totalWritten, chunkSize, &bytesWritten, portMAX_DELAY);
@@ -675,7 +662,7 @@ bool TTS::playAudioData(const uint8_t* audioData, size_t dataSize) {
     if (totalWritten > 0) {
         // Add silence padding to prevent static at the end
         size_t silenceDuration = SAMPLE_RATE * 2 * 0.1;  // 100ms of silence (16-bit samples)
-        uint8_t* silenceBuffer = (uint8_t*)calloc(silenceDuration, 1);  // Zero-filled buffer
+        uint8_t* silenceBuffer = (uint8_t*)ps_calloc(silenceDuration, 1);  // Zero-filled buffer
         if (silenceBuffer != nullptr) {
             size_t silenceWritten;
             esp_err_t err = i2s_write(I2S_PORT, silenceBuffer, silenceDuration, &silenceWritten, 1000);
@@ -713,9 +700,14 @@ bool TTS::playAudioData(const uint8_t* audioData, size_t dataSize) {
 }
 
 void TTS::stopPlayback() {
+    cancel();
+}
+
+void TTS::cancel() {
     // For simple implementation, we just stop feeding data to I2S
     // The MAX98357A will naturally stop when no more data is provided
     Serial.println("TTS: Stopping playback");
+    is_cancellation_requested = true;
 }
 
 void TTS::setVolume(float volume) {
@@ -841,55 +833,3 @@ void TTS::setDefaultLanguage(const String& language) {
     Serial.printf("TTS default language set to: %s\n", language.c_str());
 }
 
-WiFiClientSecure* TTS::getSharedWiFiClient() {
-    if (!wifiClientInitialized) {
-        if (!initializeWiFiClient()) {
-            return nullptr;
-        }
-    }
-    return wifiClient;
-}
-
-bool TTS::initializeWiFiClient() {
-    if (wifiClient != nullptr) {
-        return true; // Already initialized
-    }
-    
-    // Check available memory before proceeding
-    size_t freeHeap = ESP.getFreeHeap();
-    Serial.printf("🔧 Memory check before WiFiClient allocation: Free heap=%u\n", freeHeap);
-    
-    if (freeHeap < 50000) { // Need at least 50KB free heap for SSL
-        Serial.printf("❌ Insufficient heap memory for WiFiClientSecure: %u bytes (need 50KB+)\n", freeHeap);
-        return false;
-    }
-    
-    // Check WiFi connection before creating client
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("❌ WiFi not connected - cannot initialize secure client");
-        return false;
-    }
-    
-    // Try to allocate WiFiClientSecure with error handling
-    Serial.println("🔧 Creating shared WiFiClientSecure instance...");
-    wifiClient = new(std::nothrow) WiFiClientSecure();
-    if (!wifiClient) {
-        Serial.println("❌ Failed to allocate shared WiFiClientSecure - insufficient memory");
-        wifiClientInitialized = false;
-        return false;
-    }
-    
-    Serial.printf("✅ Shared WiFiClientSecure allocated, remaining heap: %u\n", ESP.getFreeHeap());
-    
-    // Configure the client for optimal performance and security
-    wifiClient->setInsecure();  // Skip SSL verification for simplicity
-    wifiClient->setTimeout(30000);  // 30 second timeout for connection
-    
-    // Note: setBufferSizes() is not available in all WiFiClientSecure implementations
-    // The client will use default buffer sizes which should be sufficient
-    
-    wifiClientInitialized = true;
-    Serial.println("✅ Shared WiFiClientSecure initialized successfully");
-    
-    return true;
-}

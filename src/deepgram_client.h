@@ -22,9 +22,10 @@ struct WAVHeader {
 
 class DeepgramClient {
 private:
-    HTTPClient http;
     const char* api_key;
     String defaultLanguage;
+    StaticJsonDocument<2048> stt_doc;
+    char response_buffer[2048];
     
     // Helper function to create WAV data from raw PCM
     uint8_t* createWAVData(const uint8_t* pcm_data, size_t pcm_size, size_t* wav_size);

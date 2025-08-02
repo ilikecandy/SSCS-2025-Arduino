@@ -34,6 +34,7 @@ const int COMMAND_BUFFER_SIZE = COMMAND_BUFFER_SECONDS * SAMPLE_RATE * (BITS_PER
 
 uint8_t* wake_word_buffer = nullptr;
 uint8_t* command_buffer = nullptr;
+uint8_t* stt_temp_buffer = nullptr;
 volatile int wake_word_buffer_index = 0;  // Made volatile for dual-core access
 volatile int command_buffer_index = 0;    // For command recording
 volatile bool is_recording = false;       // Made volatile for dual-core access
@@ -41,6 +42,7 @@ volatile bool wake_word_buffer_has_wrapped = false;  // Track if wake word buffe
 volatile uint32_t buffer_sequence = 0;    // Sequence number to track buffer updates
 volatile float baseline_audio_level = 0.0f; // Baseline audio level for silence detection
 volatile bool baseline_calculated = false;  // Whether baseline has been calculated
+volatile bool is_speaking = false; // Flag to prevent TTS overlap
 
 // Core synchronization
 TaskHandle_t AudioTaskHandle = NULL;
@@ -267,7 +269,12 @@ void handleSystemAction(const JsonDocument& doc) {
     
     // Handle speaking if required
     if (shouldSpeak && !message.isEmpty()) {
+        if (is_speaking) {
+            Serial.println("🗣️ TTS is already active, dropping new speak request.");
+            return;
+        }
         if (ttsAvailable) {
+            is_speaking = true; // Set flag before sending
             AudioCommand cmd;
             cmd.type = AudioCommandType::SPEAK_TEXT;
             strncpy(cmd.text, message.c_str(), sizeof(cmd.text) - 1);
@@ -275,6 +282,7 @@ void handleSystemAction(const JsonDocument& doc) {
             
             if (xQueueSend(audioCommandQueue, &cmd, 0) != pdTRUE) {
                 Serial.println("❌ Failed to queue SPEAK_TEXT command");
+                is_speaking = false; // Reset flag if queueing failed
             }
         } else {
             Serial.println("TTS not available to speak message.");
@@ -508,12 +516,14 @@ void setup() {
         Serial.println("PSRAM found, using ps_malloc.");
         wake_word_buffer = (uint8_t*)ps_malloc(WAKE_WORD_BUFFER_SIZE);
         command_buffer = (uint8_t*)ps_malloc(COMMAND_BUFFER_SIZE);
+        stt_temp_buffer = (uint8_t*)ps_malloc(WAKE_WORD_BUFFER_SIZE);
     }
     
-    if (!wake_word_buffer || !command_buffer) {
+    if (!wake_word_buffer || !command_buffer || !stt_temp_buffer) {
         Serial.println("CRITICAL: Failed to allocate audio buffers!");
         Serial.printf("Tried to allocate wake word buffer: %d bytes\n", WAKE_WORD_BUFFER_SIZE);
         Serial.printf("Tried to allocate command buffer: %d bytes\n", COMMAND_BUFFER_SIZE);
+        Serial.printf("Tried to allocate stt temp buffer: %d bytes\n", WAKE_WORD_BUFFER_SIZE);
         Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
         if (psramFound()) {
             Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
@@ -606,6 +616,14 @@ void setup() {
     
     // Set the tool callback
     visionAssistant.setToolCallback(toolHandler);
+    
+    // Play a ding sound to indicate setup is complete
+    Serial.println("✅ Setup complete! Playing notification sound...");
+    AudioCommand setupCompleteDingCmd;
+    setupCompleteDingCmd.type = AudioCommandType::PLAY_BUTTON_DING;
+    if (xQueueSend(audioCommandQueue, &setupCompleteDingCmd, 0) != pdTRUE) {
+        Serial.println("❌ Failed to queue setup complete ding command");
+    }
     
     Serial.printf("Vision Assistant setup complete on core %d - starting main loop\n", xPortGetCoreID());
 }
@@ -729,6 +747,7 @@ void audioTask(void *pvParameters) {
             if (receivedCmd.type == AudioCommandType::SPEAK_TEXT) {
                 Serial.printf("🎤 Audio task received SPEAK_TEXT: \"%s\"\n", receivedCmd.text);
                 tts.speakText(String(receivedCmd.text));
+                is_speaking = false; // Reset flag after speaking is done
             } else if (receivedCmd.type == AudioCommandType::PLAY_DING) {
                 Serial.println("🎤 Audio task received PLAY_DING");
                 playDingSound();
@@ -785,11 +804,11 @@ void audioTask(void *pvParameters) {
             }
 
             // Create a temporary buffer with the last 3 seconds of audio
-            uint8_t* temp_buffer = (uint8_t*)malloc(WAKE_WORD_BUFFER_SIZE);
-            if (!temp_buffer) {
-                Serial.println("Failed to allocate temp buffer for transcription");
+            if (!stt_temp_buffer) {
+                Serial.println("STT temp buffer not allocated");
                 continue;
             }
+            uint8_t* temp_buffer = stt_temp_buffer;
             
             int current_index;
             bool has_wrapped;
@@ -804,7 +823,6 @@ void audioTask(void *pvParameters) {
                 // Only transcribe if we have new audio data
                 if (current_sequence == last_transcribed_sequence) {
                     xSemaphoreGive(audioMutex);
-                    free(temp_buffer);
                     continue; // Skip transcription - no new audio
                 }
                 
@@ -812,12 +830,12 @@ void audioTask(void *pvParameters) {
                 if (has_wrapped) {
                     // Buffer has wrapped - copy from current position to end, then from start to current
                     int bytes_from_current_to_end = WAKE_WORD_BUFFER_SIZE - current_index;
-                    memcpy(temp_buffer, wake_word_buffer + current_index, bytes_from_current_to_end);
-                    memcpy(temp_buffer + bytes_from_current_to_end, wake_word_buffer, current_index);
+                    memcpy(stt_temp_buffer, wake_word_buffer + current_index, bytes_from_current_to_end);
+                    memcpy(stt_temp_buffer + bytes_from_current_to_end, wake_word_buffer, current_index);
                 } else {
                     // Buffer hasn't wrapped yet, copy what we have and pad with zeros
-                    memcpy(temp_buffer, wake_word_buffer, current_index);
-                    memset(temp_buffer + current_index, 0, WAKE_WORD_BUFFER_SIZE - current_index);
+                    memcpy(stt_temp_buffer, wake_word_buffer, current_index);
+                    memset(stt_temp_buffer + current_index, 0, WAKE_WORD_BUFFER_SIZE - current_index);
                 }
                 
                 // Update the last transcribed sequence
@@ -837,7 +855,7 @@ void audioTask(void *pvParameters) {
 
             // Only transcribe if we have enough real audio data (not just zeros)
             bool hasRealAudio = false;
-            int16_t* samples = (int16_t*)temp_buffer;
+            int16_t* samples = (int16_t*)stt_temp_buffer;
             int sampleCount = WAKE_WORD_BUFFER_SIZE / 2;
             for (int i = 0; i < sampleCount; i++) {
                 if (abs(samples[i]) > 200) { // Threshold for real audio
@@ -851,7 +869,7 @@ void audioTask(void *pvParameters) {
                 // Use Deepgram's search API for wake word detection instead of transcription
                 Serial.println("🔍 Searching for wake words using Deepgram search API...");
                 // TODO INCREASE CONFIDENCE
-                wakeWordDetected = deepgramClient.searchForWakeWords(temp_buffer, WAKE_WORD_BUFFER_SIZE, WAKE_WORDS, WAKE_WORDS_COUNT, 0.80f);
+                wakeWordDetected = deepgramClient.searchForWakeWords(stt_temp_buffer, WAKE_WORD_BUFFER_SIZE, WAKE_WORDS, WAKE_WORDS_COUNT, 0.80f);
                 
                 if (wakeWordDetected) {
                     Serial.println("✅ Wake word detected via search API!");
@@ -860,10 +878,14 @@ void audioTask(void *pvParameters) {
                 Serial.println("No real audio detected in buffer, skipping wake word search");
             }
 
-            free(temp_buffer);
-
             if (wakeWordDetected) {
                 Serial.println("🎙️ Wake word detected via Deepgram search API!");
+                
+                // If TTS is active, cancel it immediately
+                if (is_speaking) {
+                    Serial.println("🚫 Wake word detected during speech - cancelling TTS...");
+                    tts.cancel();
+                }
                 
                 // First, force stop the microphone to ensure I2S is freed up for the ding sound
                 stop_microphone();
@@ -1058,6 +1080,6 @@ void loop() {
         lastLanguageUpdate = millis();
     }
     
-    // Small delay to prevent watchdog issues
-    delay(10);
+    // Set a 2-second delay in the main loop to control the Gemini sending rate.
+    delay(2000);
 }

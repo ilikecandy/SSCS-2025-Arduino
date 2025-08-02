@@ -34,10 +34,7 @@ private:
     // Buffer for audio data (increased for better streaming)
     static const size_t BUFFER_SIZE = 16384;  // Larger buffer for better streaming
     uint8_t* audioBuffer;
-    
-    // Shared WiFi client instance for all HTTPS requests
-    WiFiClientSecure* wifiClient;
-    bool wifiClientInitialized;
+    volatile bool is_cancellation_requested;
     
 public:
     TTS();
@@ -59,6 +56,7 @@ public:
     // Audio playback control
     bool playAudioData(const uint8_t* audioData, size_t dataSize);
     void stopPlayback();
+    void cancel();
     
     // I2S resource management
     bool requestSpeakerAccess();
@@ -82,9 +80,6 @@ private:
     void cleanupAudioData(uint8_t* audioData);
     void applySoftwareGain(uint8_t* audioData, size_t dataSize);  // Apply software gain to audio data
     
-    // WiFi client management
-    WiFiClientSecure* getSharedWiFiClient();
-    bool initializeWiFiClient();
     
     // Static callback for HTTP response (if needed for future use)
     static size_t writeCallback(void* contents, size_t size, size_t nmemb, void* userp);
