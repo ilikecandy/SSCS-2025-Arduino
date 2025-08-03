@@ -24,8 +24,11 @@ class DeepgramClient {
 private:
     const char* api_key;
     String defaultLanguage;
-    StaticJsonDocument<2048> stt_doc;
-    char response_buffer[2048];
+    DynamicJsonDocument* stt_doc;
+    char* response_buffer;
+
+    static const size_t STT_DOC_SIZE = 2048;
+    static const size_t RESPONSE_BUFFER_SIZE = 2048;
     
     // Helper function to create WAV data from raw PCM
     uint8_t* createWAVData(const uint8_t* pcm_data, size_t pcm_size, size_t* wav_size);
@@ -39,6 +42,8 @@ private:
 
 public:
     DeepgramClient(const char* api_key);
+    ~DeepgramClient();
+    bool begin();
     String transcribe(const uint8_t* audio_data, size_t data_size);
     String transcribe(const uint8_t* audio_data, size_t data_size, const String& language);
     

@@ -1,7 +1,33 @@
 #include "deepgram_client.h"
 #include "secrets.h"
 
-DeepgramClient::DeepgramClient(const char* api_key) : api_key(api_key), defaultLanguage("e-n-US") {}
+#include "esp_heap_caps.h"
+
+DeepgramClient::DeepgramClient(const char* api_key) : api_key(api_key), defaultLanguage("en-US"), stt_doc(nullptr), response_buffer(nullptr) {
+    // Constructor now only initializes variables, allocation is handled in begin()
+}
+
+DeepgramClient::~DeepgramClient() {
+    // Free memory
+    if (stt_doc) {
+        delete stt_doc;
+    }
+    if (response_buffer) {
+        free(response_buffer);
+    }
+}
+
+bool DeepgramClient::begin() {
+    // Allocate memory in PSRAM
+    stt_doc = new DynamicJsonDocument(STT_DOC_SIZE);
+    response_buffer = (char*)ps_malloc(RESPONSE_BUFFER_SIZE);
+
+    if (!stt_doc || !response_buffer) {
+        Serial.println("FATAL: Failed to allocate memory for DeepgramClient in PSRAM!");
+        return false;
+    }
+    return true;
+}
 
 uint8_t* DeepgramClient::createWAVData(const uint8_t* pcm_data, size_t pcm_size, size_t* wav_size) {
     // Calculate WAV file size
@@ -53,15 +79,15 @@ uint8_t* DeepgramClient::createWAVData(const uint8_t* pcm_data, size_t pcm_size,
 }
 
 String DeepgramClient::extractTranscript(const String& response) {
-    if (response.isEmpty()) {
+    if (response.isEmpty() || !stt_doc) {
         return "";
     }
     
     // Use a larger document size to handle the deeply nested Deepgram response
-    stt_doc.clear();
+    stt_doc->clear();
     
     // Increase capacity for the complex Deepgram response structure
-    DeserializationError error = deserializeJson(stt_doc, response);
+    DeserializationError error = deserializeJson(*stt_doc, response);
     
     if (error) {
         Serial.printf("  %s\n", error.c_str());
@@ -83,9 +109,9 @@ String DeepgramClient::extractTranscript(const String& response) {
     }
     
     // Extract transcript from Deepgram response format
-    if (stt_doc.containsKey("results") && stt_doc["results"].containsKey("channels") &&
-        stt_doc["results"]["channels"].size() > 0) {
-        JsonArray alternatives = stt_doc["results"]["channels"][0]["alternatives"];
+    if (stt_doc->containsKey("results") && (*stt_doc)["results"].containsKey("channels") &&
+        (*stt_doc)["results"]["channels"].size() > 0) {
+        JsonArray alternatives = (*stt_doc)["results"]["channels"][0]["alternatives"];
         if (alternatives.size() > 0) {
             String transcript = alternatives[0]["transcript"].as<String>();
             return transcript;
@@ -98,12 +124,12 @@ String DeepgramClient::extractTranscript(const String& response) {
 }
 
 bool DeepgramClient::extractSearchResults(const String& response, const String& searchTerm, float minConfidence) {
-    if (response.isEmpty()) {
+    if (response.isEmpty() || !stt_doc) {
         return false;
     }
     
-    stt_doc.clear();
-    DeserializationError error = deserializeJson(stt_doc, response);
+    stt_doc->clear();
+    DeserializationError error = deserializeJson(*stt_doc, response);
     
     if (error) {
         Serial.printf("JSON parsing error for search results: %s\n", error.c_str());
@@ -111,10 +137,10 @@ bool DeepgramClient::extractSearchResults(const String& response, const String& 
     }
     
     // Extract search results from Deepgram response format
-    if (stt_doc.containsKey("results") && stt_doc["results"].containsKey("channels") &&
-        stt_doc["results"]["channels"].size() > 0) {
+    if (stt_doc->containsKey("results") && (*stt_doc)["results"].containsKey("channels") &&
+        (*stt_doc)["results"]["channels"].size() > 0) {
         
-        JsonArray searches = stt_doc["results"]["channels"][0]["search"];
+        JsonArray searches = (*stt_doc)["results"]["channels"][0]["search"];
         
         for (JsonObject search : searches) {
             String query = search["query"].as<String>();
@@ -202,9 +228,13 @@ String DeepgramClient::transcribe(const uint8_t* audio_data, size_t data_size, c
             if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_CREATED) {
                 int len = http.getSize();
                 WiFiClient* stream = http.getStreamPtr();
-                int read = stream->readBytes(response_buffer, min(len, (int)sizeof(response_buffer) - 1));
-                response_buffer[read] = '\0';
-                Serial.println("✅ Deepgram transcription successful");
+                if (response_buffer) {
+                    int read = stream->readBytes(response_buffer, min(len, (int)RESPONSE_BUFFER_SIZE - 1));
+                    response_buffer[read] = '\0';
+                    Serial.println("✅ Deepgram transcription successful");
+                } else {
+                    Serial.println("❌ Response buffer not allocated!");
+                }
                 
                 // Extract transcript from JSON response
                 String transcript = extractTranscript(response_buffer);
@@ -295,9 +325,13 @@ bool DeepgramClient::searchForWakeWords(const uint8_t* audio_data, size_t data_s
             if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_CREATED) {
                 int len = http.getSize();
                 WiFiClient* stream = http.getStreamPtr();
-                int read = stream->readBytes(response_buffer, min(len, (int)sizeof(response_buffer) - 1));
-                response_buffer[read] = '\0';
-                Serial.println("✅ Deepgram search request successful");
+                if (response_buffer) {
+                    int read = stream->readBytes(response_buffer, min(len, (int)RESPONSE_BUFFER_SIZE - 1));
+                    response_buffer[read] = '\0';
+                    Serial.println("✅ Deepgram search request successful");
+                } else {
+                    Serial.println("❌ Response buffer not allocated!");
+                }
                 
                 // Check each wake word for matches
                 for (int i = 0; i < wakeWordCount && !wakeWordFound; i++) {

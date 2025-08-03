@@ -58,6 +58,8 @@ public:
     void stopPlayback();
     void cancel();
     
+// Tone generation
+    void playTone(int frequency, int duration);
     // I2S resource management
     bool requestSpeakerAccess();
     void releaseSpeakerAccess();

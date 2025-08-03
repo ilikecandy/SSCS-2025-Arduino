@@ -199,6 +199,34 @@ void playButtonDingSound() {
     }
 }
 
+// Helper function to format ISO timestamp
+String getISOTimestamp() {
+    // Base timestamp: 2025-08-02T00:00:00Z (epoch for today)
+    unsigned long currentMillis = millis();
+    unsigned long totalSeconds = currentMillis / 1000;
+    
+    // Calculate hours, minutes, and seconds from device uptime
+    unsigned long hours = (totalSeconds / 3600) % 24;
+    unsigned long minutes = (totalSeconds / 60) % 60;
+    unsigned long seconds = totalSeconds % 60;
+    
+    // Format as ISO timestamp (using current date as base)
+    char timestamp[32];
+    snprintf(timestamp, sizeof(timestamp), "2025-08-02T%02lu:%02lu:%02luZ", hours, minutes, seconds);
+    return String(timestamp);
+}
+
+// Helper function to determine severity based on alert type
+String getSeverityLevel(const String& alertType) {
+    if (alertType == "fall_detection" || alertType == "medical_emergency" || alertType == "panic_button") {
+        return "high";
+    } else if (alertType == "obstacle_alert" || alertType == "lost_device") {
+        return "medium";
+    } else {
+        return "low";
+    }
+}
+
 void sendEmergencyAlert(const String& alertType, const String& description) {
     Serial.println("🚨 Emergency protocol activated!");
     Serial.printf("Alert Type: %s\n", alertType.c_str());
@@ -206,45 +234,69 @@ void sendEmergencyAlert(const String& alertType, const String& description) {
     
     // Get current GPS location if available
     GPSData gpsData = visionAssistant.getCurrentGPSData();
-    String locationInfo = "Location unknown";
     
+    // Create location object
+    JsonDocument locationObj;
     if (gpsData.isValid) {
-        locationInfo = String("Lat: ") + String(gpsData.latitude, 6) + 
-                      ", Lon: " + String(gpsData.longitude, 6) + 
-                      ", Alt: " + String(gpsData.altitude, 1) + "m";
+        locationObj["latitude"] = gpsData.latitude;
+        locationObj["longitude"] = gpsData.longitude;
+        locationObj["address"] = "GPS Location"; // Could be enhanced with reverse geocoding
+    } else {
+        locationObj["latitude"] = nullptr;
+        locationObj["longitude"] = nullptr;
+        locationObj["address"] = "Location unavailable";
     }
     
-    // Create emergency alert JSON
-    JsonDocument alertDoc;
-    alertDoc["type"] = "emergency_alert";
-    alertDoc["timestamp"] = millis();
-    alertDoc["alert_type"] = alertType;
-    alertDoc["description"] = description;
-    alertDoc["location"] = locationInfo;
-    alertDoc["device_id"] = "SSCS-2025-Device";
-    alertDoc["user_status"] = "emergency_detected";
+    // Determine appropriate title and message based on alert type
+    String title, message;
+    if (alertType == "fall_detection") {
+        title = "Emergency Alert - Fall Detected";
+        message = description.isEmpty() ? "Fall detected by wearable device sensors" : description;
+    } else if (alertType == "medical_emergency") {
+        title = "Medical Emergency Alert";
+        message = description.isEmpty() ? "Medical emergency detected" : description;
+    } else if (alertType == "panic_button") {
+        title = "Panic Alert";
+        message = description.isEmpty() ? "Panic button activated by user" : description;
+    } else if (alertType == "lost_device") {
+        title = "Device Location Alert";
+        message = description.isEmpty() ? "Device location tracking activated" : description;
+    } else {
+        title = "Safety Alert";
+        message = description.isEmpty() ? "Emergency situation detected" : description;
+    }
+    
+    // Create notification JSON in the specified format
+    JsonDocument notificationDoc;
+    notificationDoc["title"] = title;
+    notificationDoc["message"] = message;
+    notificationDoc["timestamp"] = getISOTimestamp();
+    notificationDoc["severity"] = getSeverityLevel(alertType);
+    notificationDoc["location"] = locationObj;
+    notificationDoc["alert_type"] = alertType;
+    notificationDoc["device_id"] = "esp32_camera";
     
     // Convert to string
     String jsonString;
-    serializeJson(alertDoc, jsonString);
+    serializeJson(notificationDoc, jsonString);
     
-    // Send POST request to emergency API
+    // Send POST request to notifications API
     HTTPClient http;
-    http.begin(String(NOTIFICATIONS_API_URL) + "/upload");
+    http.begin(String(NOTIFICATIONS_API_URL) + "/notifications");
     http.addHeader("Content-Type", "application/json");
     
-    Serial.println("📡 Sending emergency alert to API...");
-    Serial.printf("URL: %s\n", String(NOTIFICATIONS_API_URL) + "/upload");
+    Serial.println("📡 Sending emergency notification to API...");
+    Serial.printf("URL: %s\n", String(NOTIFICATIONS_API_URL) + "/notifications");
     Serial.printf("JSON: %s\n", jsonString.c_str());
     
     int httpResponseCode = http.POST(jsonString);
     
     if (httpResponseCode > 0) {
         String response = http.getString();
-        Serial.printf("✅ Emergency alert sent successfully! Response code: %d\n", httpResponseCode);
+        Serial.printf("✅ Emergency notification sent successfully! Response code: %d\n", httpResponseCode);
         Serial.printf("Response: %s\n", response.c_str());
     } else {
-        Serial.printf("❌ Failed to send emergency alert. Error code: %d\n", httpResponseCode);
+        Serial.printf("❌ Failed to send emergency notification. Error code: %d\n", httpResponseCode);
         Serial.printf("Error: %s\n", http.errorToString(httpResponseCode).c_str());
     }
     
@@ -297,10 +349,58 @@ void handleSystemAction(const JsonDocument& doc) {
     // Handle specific intents
     if (intent == "emergency_protocol") {
         Serial.println("🚨 Emergency protocol detected!");
+        
+        // Determine alert type based on message content and context
         String alertType = "fall_detection"; // Default type
         String description = message.isEmpty() ? "Emergency detected by vision assistant" : message;
         
-        // Send emergency alert
+        // Analyze message content to determine specific emergency type
+        String lowerMessage = message;
+        lowerMessage.toLowerCase();
+        
+        if (lowerMessage.indexOf("fall") != -1 || lowerMessage.indexOf("fell") != -1 || 
+            lowerMessage.indexOf("down") != -1 || lowerMessage.indexOf("trip") != -1) {
+            alertType = "fall_detection";
+            if (description == message) {
+                description = "Fall detected - " + message;
+            }
+        }
+        else if (lowerMessage.indexOf("medical") != -1 || lowerMessage.indexOf("hurt") != -1 || 
+                 lowerMessage.indexOf("pain") != -1 || lowerMessage.indexOf("sick") != -1 ||
+                 lowerMessage.indexOf("emergency") != -1) {
+            alertType = "medical_emergency";
+            if (description == message) {
+                description = "Medical emergency - " + message;
+            }
+        }
+        else if (lowerMessage.indexOf("help") != -1 || lowerMessage.indexOf("panic") != -1 || 
+                 lowerMessage.indexOf("scared") != -1 || lowerMessage.indexOf("danger") != -1) {
+            alertType = "panic_button";
+            if (description == message) {
+                description = "Panic alert - " + message;
+            }
+        }
+        else if (lowerMessage.indexOf("lost") != -1 || lowerMessage.indexOf("find") != -1 || 
+                 lowerMessage.indexOf("location") != -1) {
+            alertType = "lost_device";
+            if (description == message) {
+                description = "Location assistance - " + message;
+            }
+        }
+        else if (lowerMessage.indexOf("unresponsive") != -1 || lowerMessage.indexOf("no response") != -1 ||
+                 lowerMessage.indexOf("unconscious") != -1) {
+            alertType = "medical_emergency";
+            if (description == message) {
+                description = "User unresponsive - " + message;
+            }
+        }
+        
+        // Log the emergency details
+        if (!logEntry.isEmpty()) {
+            Serial.printf("EMERGENCY LOG: %s\n", logEntry.c_str());
+        }
+        
+        // Send emergency alert with determined type
         sendEmergencyAlert(alertType, description);
     }
     else if (intent == "obstacle_alert") {
@@ -540,6 +640,12 @@ void setup() {
     Serial.printf("✅ Successfully allocated command buffer: %d bytes\n", COMMAND_BUFFER_SIZE);
     Serial.printf("Wake word buffer address: %p\n", wake_word_buffer);
     Serial.printf("Command buffer address: %p\n", command_buffer);
+
+    // Initialize Deepgram client now that we know PSRAM is available
+    if (!deepgramClient.begin()) {
+        Serial.println("CRITICAL: Failed to initialize DeepgramClient!");
+        while(true) delay(1000);
+    }
 
     // Initialize the vision assistant (includes GPS initialization) on Core 1
     Serial.println("Initializing Vision Assistant on Core 1...");
@@ -1081,5 +1187,6 @@ void loop() {
     }
     
     // Set a 2-second delay in the main loop to control the Gemini sending rate.
-    delay(2000);
+    // Small delay to prevent watchdog issues
+    delay(10);
 }

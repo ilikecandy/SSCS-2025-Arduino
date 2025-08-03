@@ -1,4 +1,5 @@
 #include "vision_assistant.h"
+#include "TTS.h"
 
 #include <WiFi.h>
 
@@ -48,6 +49,7 @@ bool VisionAssistant::initialize() {
 
     // Set default response callback
     setResponseCallback(onGeminiResponse);
+
 
     Serial.println("Vision Assistant initialized successfully!");
     return true;

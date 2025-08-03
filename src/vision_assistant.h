@@ -6,6 +6,7 @@
 #include <ArduinoJson.h>
 #include "esp_camera.h"
 #include "gps_module.h"
+#include "TTS.h"
 
 // Forward declarations
 class VisionAssistant;

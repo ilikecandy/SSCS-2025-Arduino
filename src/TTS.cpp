@@ -832,4 +832,50 @@ void TTS::setDefaultLanguage(const String& language) {
     defaultLanguage = language;
     Serial.printf("TTS default language set to: %s\n", language.c_str());
 }
+void TTS::playTone(int frequency, int duration) {
+    if (true) return;
+    // Track if we had to request speaker access (meaning we need to release it afterwards)
+    bool requestedAccess = false;
+    
+    // Request speaker access first, force if necessary
+    if (!I2SManager::hasI2SAccess(I2SDevice::SPEAKER)) {
+        Serial.println("TTS: Requesting speaker access for tone playback...");
+        requestedAccess = true;
+        if (!requestSpeakerAccess()) {
+            Serial.println("TTS: Normal speaker access failed for tone, forcing I2S release...");
+            I2SManager::forceReleaseI2SAccess();
+            if (!requestSpeakerAccess()) {
+                Serial.println("TTS: Failed to get speaker access for tone even after force release");
+                return;
+            }
+        }
+    }
+
+    size_t numSamples = (SAMPLE_RATE * duration) / 1000;
+    size_t dataSize = numSamples * 2; // 16-bit samples
+    uint8_t* audioData = (uint8_t*)ps_malloc(dataSize);
+
+    if (!audioData) {
+        Serial.println("Failed to allocate memory for tone");
+        if (requestedAccess) {
+            releaseSpeakerAccess();
+        }
+        return;
+    }
+
+    int16_t* samples = (int16_t*)audioData;
+    for (int i = 0; i < numSamples; i++) {
+        float angle = 2.0 * PI * frequency * i / SAMPLE_RATE;
+        samples[i] = (int16_t)(32767.0 * sin(angle) * 0.5); // 50% volume
+    }
+
+    playAudioData(audioData, dataSize);
+    free(audioData);
+    
+    // If we requested access for this tone playback, release it so microphone can use I2S again
+    if (requestedAccess) {
+        Serial.println("TTS: Releasing speaker access after tone playback");
+        releaseSpeakerAccess();
+    }
+}
 
