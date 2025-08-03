@@ -17,7 +17,7 @@ private:
     static const int DATA_PIN = 2;
     
     // Audio configuration (matching working example)
-    static const int SAMPLE_RATE = 16000;  // 16kHz as used in working example
+    static const int SAMPLE_RATE = 16000;  // Standardized sample rate
     static const int BITS_PER_SAMPLE = 16;
     static const i2s_port_t I2S_PORT = I2S_NUM_1;
     

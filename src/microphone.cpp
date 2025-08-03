@@ -29,7 +29,7 @@ esp_err_t read_microphone_data(int32_t* buffer, size_t buffer_size, size_t* byte
     
     // Use longer timeout for reliable data reading (1 second instead of 100ms)
     // TODO
-    return i2s_read(I2SManager::I2S_PORT, buffer, buffer_size, bytes_read, 1000);
+    return i2s_read(I2SManager::I2S_PORT, buffer, buffer_size, bytes_read, 100);
 }
 
 void stop_microphone() {

@@ -1,7 +1,7 @@
 #include "TTS.h"
 #include "secrets.h"
 
-const char* TTS::DEEPGRAM_URL = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&model=aura-asteria-en&keywords=halo&keyterm=halo";
+const char* TTS::DEEPGRAM_URL = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&model=aura-asteria-en";
 
 TTS::TTS() : i2sInitialized(false), softwareGain(1.0), audioBuffer(nullptr), defaultLanguage("en-US"), is_cancellation_requested(false) {
 }
@@ -107,6 +107,16 @@ bool TTS::speakText(const String& text, const String& language) {
 bool TTS::streamDeepgramAPI(const String& text, const String& language) {
     Serial.printf("🤖 Synthesizing with Deepgram TTS (streaming): \"%s\" (language: %s)\n", text.c_str(), language.c_str());
 
+    // Request I2S access for speaker, forcefully if necessary
+    if (!requestSpeakerAccess()) {
+        Serial.println("TTS Streaming: Forcing I2S release for speaker...");
+        I2SManager::forceReleaseI2SAccess();
+        if (!requestSpeakerAccess()) {
+            Serial.println("❌ Cannot stream: Failed to get speaker access even after force release");
+            return false;
+        }
+    }
+
     if (deepgramApiKey.length() < 10) {
         Serial.println("❌ Deepgram API key is not set or too short");
         return false;
@@ -139,7 +149,7 @@ bool TTS::streamDeepgramAPI(const String& text, const String& language) {
     }
 
     // Build URL with language parameter - use local copies
-    String deepgramUrl = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&keywords=halo&keyterm=halo";
+    String deepgramUrl = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000";
     
     // Add model based on language
     if (localLanguage == "es" || localLanguage == "spanish") {
@@ -248,7 +258,7 @@ bool TTS::streamDeepgramAPI(const String& text, const String& language) {
             
             // Calculate approximate playback duration and wait
             unsigned long estimatedDurationMs = (bytesWrittenToI2S * 1000) / (SAMPLE_RATE * 2);  // 16-bit samples
-            unsigned long waitTime = estimatedDurationMs + 600;  // Add larger buffer for silence padding
+            unsigned long waitTime = estimatedDurationMs * 3;  // Multiply by 3 to prevent static
             
             Serial.printf("Waiting %lu ms for audio playback to complete...\n", waitTime);
             delay(waitTime);
@@ -270,6 +280,7 @@ bool TTS::streamDeepgramAPI(const String& text, const String& language) {
     }
     
     http.end();
+    releaseSpeakerAccess();
     return success;
 }
 
@@ -370,7 +381,7 @@ bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** 
     }
     
     // Build URL with language parameter - use local copies
-    String deepgramUrl = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&keywords=halo&keyterm=halo";
+    String deepgramUrl = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000";
     
     // Add model based on language
     if (localLanguage == "es" || localLanguage == "spanish") {
@@ -674,7 +685,7 @@ bool TTS::playAudioData(const uint8_t* audioData, size_t dataSize) {
         
         // Calculate playback duration and wait for completion
         unsigned long estimatedDurationMs = (totalWritten * 1000) / (SAMPLE_RATE * 2);  // 16-bit samples
-        unsigned long waitTime = estimatedDurationMs + 200;  // Add larger buffer for silence padding
+        unsigned long waitTime = estimatedDurationMs * 3;  // Multiply by 3 to prevent static
         
         Serial.printf("Waiting %lu ms for audio playback to complete...\n", waitTime);
         delay(waitTime);

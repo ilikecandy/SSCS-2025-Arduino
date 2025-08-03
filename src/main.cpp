@@ -82,21 +82,22 @@ bool isAudioSilent();
 
 // Tool call handler for system actions
 void toolHandler(const String& toolName, const String& jsonParams) {
-    Serial.printf("Tool call handler invoked for: %s\n", toolName.c_str());
     if (toolName == "systemAction") {
-        Serial.printf("systemAction call received with params: %s\n", jsonParams.c_str());
-        
-        // Parse JSON parameters
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, jsonParams);
-        
         if (error) {
-            Serial.printf("Failed to parse JSON parameters: %s\n", error.c_str());
+            Serial.printf("Failed to parse systemAction JSON: %s\n", error.c_str());
             return;
         }
         
-        // Handle the systemAction
+        // Conditionally print based on shouldSpeak to reduce log noise
+        if (doc["shouldSpeak"].as<bool>()) {
+            Serial.printf("systemAction call received with params: %s\n", jsonParams.c_str());
+        }
+        
         handleSystemAction(doc);
+    } else {
+        Serial.printf("Tool call handler invoked for unknown tool: %s\n", toolName.c_str());
     }
 }
 
@@ -312,12 +313,13 @@ void handleSystemAction(const JsonDocument& doc) {
     // String routeTo = doc["routeTo"].as<String>();
     String routeParams = doc["routeParams"].as<String>();
     
-    Serial.printf("Intent: %s\n", intent.c_str());
-    Serial.printf("Should Speak: %s\n", shouldSpeak ? "true" : "false");
-    Serial.printf("Message: %s\n", message.c_str());
-    Serial.printf("Log Entry: %s\n", logEntry.c_str());
-    // Serial.printf("Route To: %s\n", routeTo.c_str());
-    Serial.printf("Route Params: %s\n", routeParams.c_str());
+    if (shouldSpeak) {
+        Serial.printf("Intent: %s\n", intent.c_str());
+        Serial.printf("Should Speak: %s\n", shouldSpeak ? "true" : "false");
+        Serial.printf("Message: %s\n", message.c_str());
+        Serial.printf("Log Entry: %s\n", logEntry.c_str());
+        Serial.printf("Route Params: %s\n", routeParams.c_str());
+    }
     
     // Handle speaking if required
     if (shouldSpeak && !message.isEmpty()) {
@@ -964,7 +966,7 @@ void audioTask(void *pvParameters) {
             int16_t* samples = (int16_t*)stt_temp_buffer;
             int sampleCount = WAKE_WORD_BUFFER_SIZE / 2;
             for (int i = 0; i < sampleCount; i++) {
-                if (abs(samples[i]) > 200) { // Threshold for real audio
+                if (abs(samples[i]) > 50) { // Threshold for real audio
                     hasRealAudio = true;
                     break;
                 }
@@ -975,7 +977,7 @@ void audioTask(void *pvParameters) {
                 // Use Deepgram's search API for wake word detection instead of transcription
                 Serial.println("🔍 Searching for wake words using Deepgram search API...");
                 // TODO INCREASE CONFIDENCE
-                wakeWordDetected = deepgramClient.searchForWakeWords(stt_temp_buffer, WAKE_WORD_BUFFER_SIZE, WAKE_WORDS, WAKE_WORDS_COUNT, 0.80f);
+                wakeWordDetected = deepgramClient.searchForWakeWords(stt_temp_buffer, WAKE_WORD_BUFFER_SIZE, WAKE_WORDS, WAKE_WORDS_COUNT, 0.60f);
                 
                 if (wakeWordDetected) {
                     Serial.println("✅ Wake word detected via search API!");
@@ -993,15 +995,12 @@ void audioTask(void *pvParameters) {
                     tts.cancel();
                 }
                 
-                // First, force stop the microphone to ensure I2S is freed up for the ding sound
-                stop_microphone();
-                I2SManager::forceReleaseI2SAccess(); // Force release any lingering I2S access
-                
-                // Play confirmation ding sound (now that I2S is free)
-                playDingSound();
-                
-                // Restart the microphone for recording the command
-                setup_microphone();
+                // Queue a ding sound to be played by the audio task, which will handle I2S switching
+                AudioCommand dingCmd;
+                dingCmd.type = AudioCommandType::PLAY_DING;
+                if (xQueueSend(audioCommandQueue, &dingCmd, 0) != pdTRUE) {
+                    Serial.println("❌ Failed to queue PLAY_DING command");
+                }
                 
                 is_recording = true;
                 recording_start_time = millis();
