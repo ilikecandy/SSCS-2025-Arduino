@@ -66,6 +66,9 @@ public:
 
     // Send a text message to Gemini (queues it to be sent with next frame)
     void sendTextMessage(const String& message);
+
+    // GPS distance calculation
+    float calculateDistance(float lat1, float lon1, float lat2, float lon2);
     
     // Queue management
     void queueUserCommand(const String& command);

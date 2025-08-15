@@ -15,6 +15,9 @@ DeepgramClient deepgramClient(DEEPGRAM_API_KEY);
 SettingsManager settingsManager(NOTIFICATIONS_API_URL);
 bool ttsAvailable = false;
 
+// Button Pin for Push-to-Talk and SOS
+const int BUTTON_PIN = 15;
+
 // Wake words (optimized for Deepgram's acoustic search - longer phrases work better)
 const char* WAKE_WORDS[] = {
     "halo",
@@ -44,6 +47,10 @@ volatile float baseline_audio_level = 0.0f; // Baseline audio level for silence 
 volatile bool baseline_calculated = false;  // Whether baseline has been calculated
 volatile bool is_speaking = false; // Flag to prevent TTS overlap
 
+// GPS and Places API
+GPSData last_checked_gps_data;
+unsigned long last_places_check_time = 0;
+
 // Core synchronization
 TaskHandle_t AudioTaskHandle = NULL;
 SemaphoreHandle_t audioMutex;
@@ -54,7 +61,9 @@ QueueHandle_t audioCommandQueue; // For sending commands to the audio task
 enum class AudioCommandType {
     SPEAK_TEXT,
     PLAY_DING,
-    PLAY_BUTTON_DING
+    PLAY_BUTTON_DING,
+    START_RECORDING,
+    STOP_RECORDING_AND_PROCESS
 };
 
 // Struct for audio commands
@@ -79,6 +88,10 @@ void handleSystemAction(const JsonDocument& doc);
 void initializeLanguageSettings();
 void calculateBaselineAudioLevel();
 bool isAudioSilent();
+void processRecordedCommand();
+void handleButton();
+void checkAndAnnounceNearbyPlaces();
+String stripHtmlTags(const String& html);
 
 // Tool call handler for system actions
 void toolHandler(const String& toolName, const String& jsonParams) {
@@ -96,9 +109,67 @@ void toolHandler(const String& toolName, const String& jsonParams) {
         }
         
         handleSystemAction(doc);
-    } else {
-        Serial.printf("Tool call handler invoked for unknown tool: %s\n", toolName.c_str());
-    }
+    } else if (toolName == "getDirections") {
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, jsonParams);
+        if (error) {
+            Serial.printf("Failed to parse getDirections JSON: %s\n", error.c_str());
+            return;
+        }
+        String destination = doc["destination"].as<String>();
+        Serial.printf("getDirections call received with destination: %s\n", destination.c_str());
+
+        GPSData origin = visionAssistant.getCurrentGPSData();
+        if (!origin.isValid) {
+            String message = "Sorry, I can't get directions without a valid GPS location.";
+            AudioCommand cmd;
+            cmd.type = AudioCommandType::SPEAK_TEXT;
+            strncpy(cmd.text, message.c_str(), sizeof(cmd.text) - 1);
+            cmd.text[sizeof(cmd.text) - 1] = '\0';
+            xQueueSend(audioCommandQueue, &cmd, 0);
+            return;
+        }
+
+        HTTPClient http;
+        String url = "https://maps.googleapis.com/maps/api/directions/json?origin=" +
+                     String(origin.latitude, 6) + "," + String(origin.longitude, 6) +
+                     "&destination=" + destination +
+                     "&key=" + String(GEMINI_API_KEY);
+        
+        http.begin(url);
+        int httpResponseCode = http.GET();
+        String directions = "";
+
+        if (httpResponseCode == 200) {
+            String payload = http.getString();
+            JsonDocument dirDoc;
+            deserializeJson(dirDoc, payload);
+
+            if (dirDoc["status"] == "OK") {
+                JsonArray steps = dirDoc["routes"][0]["legs"][0]["steps"];
+                directions = "Starting route. ";
+                for (int i = 0; i < steps.size() && i < 3; i++) { // Read out first 3 steps
+                    String instruction = steps[i]["html_instructions"];
+                    directions += stripHtmlTags(instruction) + ". ";
+                }
+            } else {
+                directions = "Sorry, I could not find directions to " + destination;
+            }
+        } else {
+            directions = "Sorry, there was an error getting directions.";
+        }
+        http.end();
+
+        AudioCommand cmd;
+        cmd.type = AudioCommandType::SPEAK_TEXT;
+        strncpy(cmd.text, directions.c_str(), sizeof(cmd.text) - 1);
+        cmd.text[sizeof(cmd.text) - 1] = '\0';
+        if (xQueueSend(audioCommandQueue, &cmd, 0) != pdTRUE) {
+            Serial.println("❌ Failed to queue SPEAK_TEXT command for directions");
+        }
+     } else {
+         Serial.printf("Tool call handler invoked for unknown tool: %s\n", toolName.c_str());
+     }
 }
 
 void playDingSound() {
@@ -725,6 +796,10 @@ void setup() {
     // Set the tool callback
     visionAssistant.setToolCallback(toolHandler);
     
+    // Set up button pin
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    Serial.println("Button pin initialized.");
+    
     // Play a ding sound to indicate setup is complete
     Serial.println("✅ Setup complete! Playing notification sound...");
     AudioCommand setupCompleteDingCmd;
@@ -862,6 +937,30 @@ void audioTask(void *pvParameters) {
             } else if (receivedCmd.type == AudioCommandType::PLAY_BUTTON_DING) {
                 Serial.println("🎤 Audio task received PLAY_BUTTON_DING");
                 playButtonDingSound();
+            } else if (receivedCmd.type == AudioCommandType::START_RECORDING) {
+                Serial.println("🎤 Audio task received START_RECORDING");
+                if (is_speaking) {
+                    Serial.println("🚫 Button pressed during speech - cancelling TTS...");
+                    tts.cancel();
+                }
+                
+                is_recording = true;
+                recording_start_time = millis();
+                Serial.println("Recording command (button press)...");
+                
+                if (xSemaphoreTake(audioMutex, portMAX_DELAY)) {
+                    command_buffer_index = 0;
+                    baseline_calculated = false;
+                    if (command_buffer) {
+                        memset(command_buffer, 0, COMMAND_BUFFER_SIZE);
+                    }
+                    xSemaphoreGive(audioMutex);
+                }
+            } else if (receivedCmd.type == AudioCommandType::STOP_RECORDING_AND_PROCESS) {
+                Serial.println("🎤 Audio task received STOP_RECORDING_AND_PROCESS");
+                if (is_recording) {
+                    processRecordedCommand();
+                }
             }
 
             if (micWasActive) {
@@ -1069,65 +1168,201 @@ void audioTask(void *pvParameters) {
 
             // Stop recording if max time reached or silence detected
             if (millis() - recording_start_time > 15000 || shouldStopForSilence) { // 15 seconds max or silence
-                is_recording = false;
-                recording_start_time = 0;
-                
                 if (shouldStopForSilence) {
                     Serial.println("Recording finished due to silence. Processing command...");
                 } else {
                     Serial.println("Recording finished (15s max). Processing command...");
                 }
-                
-                // DO NOT play ding sound here - only ding before recording starts, not after it ends
-                // The ding after wake word detection indicates "ready for command"
-                // No need for another ding when command recording ends
-                
-                // Only process if we have sufficient audio data
-                if (command_buffer && command_buffer_index >= 16000 && command_buffer_index <= COMMAND_BUFFER_SIZE) { // At least 1 second, but not exceeding buffer
-                    uint8_t* temp_command_buffer = (uint8_t*)malloc(command_buffer_index);
-                    if (temp_command_buffer && xSemaphoreTake(audioMutex, portMAX_DELAY)) {
-                        // Double-check buffer bounds before copying
-                        if (command_buffer_index <= COMMAND_BUFFER_SIZE) {
-                            memcpy(temp_command_buffer, command_buffer, command_buffer_index);
-                            int buffer_size = command_buffer_index;
-                            xSemaphoreGive(audioMutex);
-                            
-                            Serial.printf("🎤 Processing %d bytes of command audio\n", buffer_size);
-                            String command = deepgramClient.transcribe(temp_command_buffer, buffer_size);
-                            Serial.println("Command: " + command);
-
-                            if (!command.isEmpty()) {
-                                // Send command to main core via queue using safe struct
-                                CommandMessage cmdMsg;
-                                strncpy(cmdMsg.command, command.c_str(), sizeof(cmdMsg.command) - 1);
-                                cmdMsg.command[sizeof(cmdMsg.command) - 1] = '\0'; // Ensure null termination
-                                
-                                if (xQueueSend(commandQueue, &cmdMsg, 0) != pdTRUE) {
-                                    Serial.println("Failed to queue command");
-                                }
-                            }
-                        } else {
-                            Serial.printf("❌ Command buffer index out of bounds: %d > %d\n", command_buffer_index, COMMAND_BUFFER_SIZE);
-                            xSemaphoreGive(audioMutex);
-                        }
-                        
-                        free(temp_command_buffer);
-                    } else {
-                        Serial.println("Failed to allocate temp command buffer or get mutex");
-                        if (temp_command_buffer) {
-                            free(temp_command_buffer);
-                        }
-                    }
-                } else {
-                    Serial.printf("Not enough audio data recorded or buffer corrupted: %d bytes (need >= 16000, <= %d)\n", 
-                                command_buffer_index, COMMAND_BUFFER_SIZE);
-                }
+                processRecordedCommand();
             }
         }
 
         // Small delay to prevent watchdog issues
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+}
+
+void processRecordedCommand() {
+    is_recording = false;
+    
+    // Play a ding sound to indicate the command was transcribed
+    AudioCommand buttonDingCmd;
+    buttonDingCmd.type = AudioCommandType::PLAY_BUTTON_DING;
+    if (xQueueSend(audioCommandQueue, &buttonDingCmd, 0) != pdTRUE) {
+        Serial.println("❌ Failed to queue PLAY_BUTTON_DING command");
+    }
+
+    if (command_buffer && command_buffer_index > 8000) { // Need at least 0.5s of audio
+        uint8_t* temp_command_buffer = (uint8_t*)malloc(command_buffer_index);
+        if (temp_command_buffer && xSemaphoreTake(audioMutex, portMAX_DELAY)) {
+            if (command_buffer_index <= COMMAND_BUFFER_SIZE) {
+                memcpy(temp_command_buffer, command_buffer, command_buffer_index);
+                int buffer_size = command_buffer_index;
+                xSemaphoreGive(audioMutex);
+
+                Serial.printf("🎤 Processing %d bytes of command audio\n", buffer_size);
+                String command = deepgramClient.transcribe(temp_command_buffer, buffer_size);
+                Serial.println("Command: " + command);
+
+                if (!command.isEmpty()) {
+                    CommandMessage cmdMsg;
+                    strncpy(cmdMsg.command, command.c_str(), sizeof(cmdMsg.command) - 1);
+                    cmdMsg.command[sizeof(cmdMsg.command) - 1] = '\0';
+                    if (xQueueSend(commandQueue, &cmdMsg, 0) != pdTRUE) {
+                        Serial.println("Failed to queue command");
+                    }
+                }
+                free(temp_command_buffer);
+            } else {
+                Serial.printf("❌ Command buffer index out of bounds: %d > %d\n", command_buffer_index, COMMAND_BUFFER_SIZE);
+                xSemaphoreGive(audioMutex);
+                free(temp_command_buffer);
+            }
+        } else {
+            Serial.println("Failed to allocate temp command buffer or get mutex");
+            if (temp_command_buffer) free(temp_command_buffer);
+        }
+    } else {
+        Serial.printf("Not enough audio data recorded: %d bytes\n", command_buffer_index);
+    }
+}
+
+void handleButton() {
+    static bool last_button_state = HIGH;
+    static bool button_held_down = false;
+    static int short_press_count = 0;
+    static unsigned long last_press_time = 0;
+    static unsigned long press_start_time = 0;
+
+    bool current_button_state = digitalRead(BUTTON_PIN);
+
+    // Button pressed
+    if (current_button_state == LOW && last_button_state == HIGH) {
+        delay(50); // Debounce
+        if (digitalRead(BUTTON_PIN) == LOW) {
+            press_start_time = millis();
+            button_held_down = true;
+
+            // Check if this press is part of an SOS sequence
+            if (millis() - last_press_time < 1000) { // 1 second between presses for SOS
+                short_press_count++;
+            } else {
+                short_press_count = 1; // Reset if too much time has passed
+            }
+            last_press_time = millis();
+
+            Serial.printf("Button pressed, count: %d\n", short_press_count);
+        }
+    }
+    // Button released
+    else if (current_button_state == HIGH && last_button_state == LOW) {
+        if (button_held_down) {
+            unsigned long press_duration = millis() - press_start_time;
+
+            if (press_duration < 500) { // Short press
+                Serial.printf("Short press detected (duration: %lu ms)\n", press_duration);
+                if (short_press_count >= 5) {
+                    Serial.println("🆘 SOS condition met! Sending alert.");
+                    sendEmergencyAlert("panic_button", "SOS button activated with 5 short presses.");
+                    short_press_count = 0; // Reset after sending
+                }
+            } else { // Long press (push-to-talk)
+                Serial.printf("Long press detected (duration: %lu ms) - stopping recording.\n", press_duration);
+                short_press_count = 0; // Reset SOS count on long press
+                AudioCommand cmd;
+                cmd.type = AudioCommandType::STOP_RECORDING_AND_PROCESS;
+                if (xQueueSend(audioCommandQueue, &cmd, 0) != pdTRUE) {
+                    Serial.println("❌ Failed to queue STOP_RECORDING_AND_PROCESS command");
+                }
+            }
+            button_held_down = false;
+        }
+    }
+
+    // Start recording on initial press if it's not an SOS sequence that's about to trigger
+    if (button_held_down && (millis() - press_start_time > 50) && (millis() - press_start_time < 100) && short_press_count < 5) {
+        if (!is_recording) {
+            Serial.println("Starting push-to-talk recording.");
+            AudioCommand cmd;
+            cmd.type = AudioCommandType::START_RECORDING;
+            if (xQueueSend(audioCommandQueue, &cmd, 0) != pdTRUE) {
+                Serial.println("❌ Failed to queue START_RECORDING command");
+            }
+        }
+    }
+
+    // Reset SOS count if time between presses is too long
+    if (short_press_count > 0 && millis() - last_press_time > 1000) {
+        // Serial.println("Resetting SOS count due to timeout.");
+        short_press_count = 0;
+    }
+
+    last_button_state = current_button_state;
+}
+
+void checkAndAnnounceNearbyPlaces() {
+    if (millis() - last_places_check_time < 30000) { // Check every 30 seconds
+        return;
+    }
+    last_places_check_time = millis();
+
+    GPSData current_gps_data = visionAssistant.getCurrentGPSData();
+    if (!current_gps_data.isValid) {
+        return;
+    }
+
+    // Check if user has moved more than 20 meters
+    float distance = visionAssistant.calculateDistance(last_checked_gps_data.latitude, last_checked_gps_data.longitude, current_gps_data.latitude, current_gps_data.longitude);
+    if (distance < 20.0 && last_checked_gps_data.isValid) {
+        return;
+    }
+
+    last_checked_gps_data = current_gps_data;
+
+    HTTPClient http;
+    String url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=" +
+                 String(current_gps_data.latitude, 6) + "," +
+                 String(current_gps_data.longitude, 6) +
+                 "&radius=50&key=" + String(GEMINI_API_KEY);
+
+    http.begin(url);
+    int httpResponseCode = http.GET();
+
+    if (httpResponseCode == 200) {
+        String payload = http.getString();
+        JsonDocument doc;
+        deserializeJson(doc, payload);
+
+        if (doc["results"].size() > 0) {
+            String place_name = doc["results"][0]["name"].as<String>();
+            String message = "You are entering " + place_name;
+            Serial.println(message);
+
+            AudioCommand cmd;
+            cmd.type = AudioCommandType::SPEAK_TEXT;
+            strncpy(cmd.text, message.c_str(), sizeof(cmd.text) - 1);
+            cmd.text[sizeof(cmd.text) - 1] = '\0';
+            if (xQueueSend(audioCommandQueue, &cmd, 0) != pdTRUE) {
+                Serial.println("❌ Failed to queue SPEAK_TEXT command for nearby place");
+            }
+        }
+    }
+    http.end();
+}
+
+String stripHtmlTags(const String& html) {
+    String text = "";
+    bool inTag = false;
+    for (char c : html) {
+        if (c == '<') {
+            inTag = true;
+        } else if (c == '>') {
+            inTag = false;
+        } else if (!inTag) {
+            text += c;
+        }
+    }
+    return text;
 }
 
 void loop() {
@@ -1143,8 +1378,14 @@ void loop() {
         Serial.printf("Setup delay complete, starting main loop processing on core %d\n", xPortGetCoreID());
     }
     
+    // Handle button presses for push-to-talk and SOS
+    handleButton();
+
     // Run the vision assistant (handles WebSocket communication, GPS updates, and frame processing)
     visionAssistant.run();
+
+    // Check for nearby places
+    checkAndAnnounceNearbyPlaces();
     
     // Check for commands from the audio task
     CommandMessage cmdMsg;
@@ -1152,15 +1393,9 @@ void loop() {
         Serial.printf("Received command from audio core: %s\n", cmdMsg.command);
         
         // Play button ding sound to indicate command was transcribed and is being processed
-        AudioCommand buttonDingCmd;
-        buttonDingCmd.type = AudioCommandType::PLAY_BUTTON_DING;
-        if (xQueueSend(audioCommandQueue, &buttonDingCmd, 0) != pdTRUE) {
-            Serial.println("❌ Failed to queue PLAY_BUTTON_DING command");
-        }
-        
         visionAssistant.sendTextMessage(String(cmdMsg.command)); // Convert to String only when needed locally
     }
-
+    
     // Print GPS status every 30 seconds
     static unsigned long lastGPSStatus = 0;
     if (millis() - lastGPSStatus > 30000) {

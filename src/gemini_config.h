@@ -45,6 +45,7 @@ USER VOICE COMMANDS/QUERIES (intent=voice_query):
   * 'What do you see?' -> Call 'systemAction' with intent='voice_query', shouldSpeak=true, message='I see [description of current view].'
   * 'Remember my keys are on the table' -> Call 'systemAction' with intent='memory_store', shouldSpeak=true, message='I will remember your keys are on the table.', logEntry='User stored memory: keys on table.'
   * 'Where did I put my wallet?' -> Call 'systemAction' with intent='voice_query', shouldSpeak=true, message='You put your wallet [location if known, or I do not have that information stored].'
+  * 'Where is the nearest park?' -> Call 'getDirections' with destination='nearest park'.
 
 FALLS & EMERGENCIES (intent=emergency_protocol):
 - Fall detected: Call 'systemAction' with intent='emergency_protocol', shouldSpeak=true, message='Fall detected. Are you okay? Contacting your companion.'
@@ -87,6 +88,20 @@ const char* const TOOLS_JSON = R"({
           }
         },
         "required": ["intent", "shouldSpeak"]
+      }
+    },
+    {
+      "name": "getDirections",
+      "description": "Get directions to a destination.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "destination": {
+            "type": "string",
+            "description": "The destination to get directions to."
+          }
+        },
+        "required": ["destination"]
       }
     }
   ]
